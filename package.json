@@ -1,0 +1,20 @@
+{
+  "name": "sixth-street-logo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Interactive 3D OBJ viewer and editor built with Vue 3 and Three.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.183.2",
+    "vue": "^3.5.32"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.5",
+    "vite": "^8.0.4"
+  }
+}
