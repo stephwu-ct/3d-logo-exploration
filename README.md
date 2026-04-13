@@ -1,236 +1,67 @@
-# Sixth Street Logo - 3D OBJ Viewer & Editor
+# 6th Street Logo — 3D Wireframe Viewer
 
-An interactive web-based 3D model viewer and editor built with Vue 3 and Three.js. Upload OBJ files and manipulate them with intuitive drag-and-rotate controls, adjust scale, and export screenshots.
+Interactive 3D wireframe editor for the 6th Street logo, built with Vue 3, Three.js, and Tweakpane. Used for motion/animation exploration.
 
-## Features
+## Stack
 
-- 👁️ **Interactive 3D Viewer** - Render and view OBJ files with smooth interactions
-- 🖱️ **Drag & Rotate** - Click and drag to rotate the model in real-time
-- 📏 **Transform Controls** - Adjust rotation and scale using sliders
-- 📸 **Screenshot Export** - Download rendered view as PNG
-- 🎨 **Professional UI** - Clean, intuitive interface for designers
-- 📱 **Responsive Design** - Works on desktop and tablet devices
-- 🚀 **GitHub Pages Ready** - Deploy directly to GitHub Pages
+- **Vue 3** (Composition API, `<script setup>`)
+- **Three.js** with `LineSegments2` + `LineMaterial` for true thick wireframe edges
+- **Tweakpane v4** for the control panel
+- **Vite** dev server
 
-## Getting Started
-
-### Prerequisites
-
-- Node.js 16+ and npm
-
-### Installation
+## Getting started
 
 ```bash
 npm install
-```
-
-### Development
-
-Start the development server:
-
-```bash
 npm run dev
+# → http://localhost:5173
 ```
 
-Then open your browser and navigate to `http://localhost:5173/`.
+## Controls
 
-### Building for Production
+### Tweakpane panel (top right)
 
-Build the project for deployment:
+| Control | Description |
+|---|---|
+| Background | Canvas background color |
+| Edge Color | Wireframe edge color |
+| Edge Weight | Line thickness in screen pixels (1–100) |
+| Rot X / Y / Z | Rotation in degrees |
+| Scale | Uniform scale |
+| Pivot | Offset the rotation pivot point for animation |
+| Reset View | Returns to default rotation and scale |
+| Screenshot | Downloads current frame as PNG |
+| Download Preset | Exports all PARAMS values as JSON |
+
+### Mouse
+
+| Action | Result |
+|---|---|
+| Left drag | Rotate |
+| Right drag / Shift + drag | Pan |
+| Scroll wheel | Zoom |
+
+### Loading files
+
+Click **Load File (OBJ / SVG)** to replace the default logo geometry with your own:
+- `.obj` — loaded as-is, centered and fitted, edges extracted
+- `.svg` — extruded into 3D; an **Extrusion** depth slider appears
+
+## Default geometry
+
+The 6th Street logo is coded directly (`loadDefaultLogo`) as:
+- `BoxGeometry(2, 2, 2)` — the cube body
+- `PlaneGeometry(2, 2)` rotated to the YZ plane at x=-1, y=2 — the upstroke
+
+This matches the `public/sixth-logo.obj` shape exactly. No file load required on startup.
+
+## Grid guides
+
+A fixed XY-plane grid sits at the scene root (z = -0.5). It does **not** move with the model — it marks world (0, 0) as a stable reference while you pan and rotate the logo.
+
+## Build
 
 ```bash
-npm run build
+npm run build   # output → dist/
+npm run preview # preview the production build
 ```
-
-The output will be in the `dist/` directory.
-
-### Preview Production Build
-
-```bash
-npm run preview
-```
-
-## GitHub Pages Deployment
-
-### Step 1: Create a GitHub Repository
-
-1. Create a new public repository on GitHub
-2. Clone it to your local machine
-3. Copy this project's files into the repository
-
-### Step 2: Update Configuration
-
-If your repository is not named `username.github.io`, update the `base` path in `vite.config.js`:
-
-```javascript
-export default defineConfig({
-  // ...
-  base: '/repository-name/', // Change to your repo name
-})
-```
-
-### Step 3: Build and Deploy
-
-1. Build the project:
-   ```bash
-   npm run build
-   ```
-
-2. Commit and push the `dist/` folder to your repository:
-   ```bash
-   git add dist/
-   git commit -m "Deploy to GitHub Pages"
-   git push origin main
-   ```
-
-3. In your GitHub repository settings:
-   - Go to **Settings** → **Pages**
-   - Under "Build and deployment", select:
-     - Source: **Deploy from a branch**
-     - Branch: **main** (or your default branch)
-     - Folder: **/ (root)** or **/dist** (depending on your setup)
-
-Alternatively, use **GitHub Actions** to automate deployment (recommended).
-
-### Step 3 (Alternative): Using GitHub Actions
-
-Create a `.github/workflows/deploy.yml` file:
-
-```yaml
-name: Build and Deploy
-
-on:
-  push:
-    branches:
-      - main
-
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Build
-        run: npm run build
-      
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
-```
-
-## Usage
-
-1. **Load an OBJ File**
-   - Click on "File Upload" and select your OBJ file
-   - The model will be loaded and centered in the viewer
-
-2. **Rotate the Model**
-   - Click and drag on the 3D canvas to rotate
-   - Use the rotation sliders for precise control
-
-3. **Adjust Scale**
-   - Use the Scale slider to zoom in/out
-
-4. **Reset View**
-   - Click "Reset View" to return to default position and scale
-
-5. **Export Screenshot**
-   - Click "Download Screenshot" to save a PNG of the current view
-
-## Project Structure
-
-```
-src/
-├── components/
-│   ├── ThreeViewer.vue      # Main 3D viewer component
-│   └── HelloWorld.vue         # Can be removed
-├── App.vue                    # Root component
-├── main.js                    # Application entry point
-└── style.css                  # Global styles
-```
-
-## Technologies
-
-- **Vue 3** - Progressive JavaScript framework
-- **Vite** - Next generation frontend tooling
-- **Three.js** - 3D JavaScript library
-- **OBJLoader** - Three.js OBJ file parser
-
-## Supported File Formats
-
-- **.obj** - Wavefront OBJ format (with MTL materials support)
-
-## Browser Compatibility
-
-- Chrome/Edge 60+
-- Firefox 55+
-- Safari 11+
-- Mobile browsers (iOS Safari 11+, Chrome Android 60+)
-
-## Performance Tips
-
-- For large models (100k+ polygons), consider optimizing geometry
-- Use lower resolution screenshots if needed
-- Clear browser cache if experiencing loading issues
-
-## Customization
-
-### Changing the Default Color
-
-Edit `src/components/ThreeViewer.vue` and modify the material color in the `loadOBJ` function:
-
-```javascript
-child.material = new THREE.MeshPhongMaterial({
-  color: 0x6366f1,  // Change this hex value
-  specular: 0x111111,
-  shininess: 200,
-});
-```
-
-### Adjusting Lighting
-
-Modify the light setup in the `initThreeScene` function within `ThreeViewer.vue`.
-
-### Changing UI Colors
-
-Edit the color variables in `ThreeViewer.vue` scoped styles section.
-
-## Troubleshooting
-
-### Model doesn't load
-- Ensure the OBJ file is valid
-- Check browser console for error messages
-- Verify the file format is correct
-
-### Slow performance
-- Reduce model polygon count
-- Close other browser tabs
-- Try a different browser
-
-### GitHub Pages deployment issues
-- Verify the `base` path in `vite.config.js` matches your repository name
-- Clear browser cache
-- Check GitHub Actions logs for build errors
-
-## License
-
-MIT
-
-## Support
-
-For issues or questions, please create an issue on the GitHub repository.
-
----
-
-Built with ❤️ for designers and 3D enthusiasts
-
