@@ -6,15 +6,30 @@
         <h3>File Upload</h3>
         <input
           type="file"
-          accept=".obj"
+          accept=".obj,.svg"
           @change="handleFileUpload"
           class="file-input"
         />
-        <p class="help-text">Supported: OBJ files</p>
+        <p class="help-text">Supported: OBJ, SVG files</p>
       </div>
 
       <div class="control-group">
         <h3>Material & Colors</h3>
+        
+        <div v-if="isSVGLoaded" class="control-row">
+          <label>Extrusion Depth:</label>
+          <input
+            v-model.number="extrusionDepth"
+            type="range"
+            min="0.1"
+            max="50"
+            step="0.5"
+            @input="updateExtrusion"
+            class="slider"
+          />
+          <span class="value">{{ extrusionDepth.toFixed(1) }}</span>
+        </div>
+
         <div class="control-row">
           <label>Fill Color:</label>
           <div class="color-input-wrapper">
@@ -58,8 +73,8 @@
             v-model.number="strokeWidth"
             type="range"
             min="0.5"
-            max="3"
-            step="0.1"
+            max="15"
+            step="0.5"
             @input="updateWireframeWidth"
             class="slider"
           />
@@ -69,6 +84,17 @@
 
       <div class="control-group">
         <h3>Transform Controls</h3>
+        <div class="help-text">
+          🖱️ <strong>Mouse Controls:</strong><br/>
+          • <strong>Left-click + Drag:</strong> Rotate<br/>
+          • <strong>Right-click + Drag:</strong> Pan<br/>
+          • <strong>Scroll:</strong> Zoom<br/>
+          <br/>
+          🖱️ <strong>Trackpad Controls:</strong><br/>
+          • <strong>Left-click + Drag:</strong> Rotate<br/>
+          • <strong>Shift + Drag:</strong> Pan<br/>
+          • <strong>Scroll:</strong> Zoom
+        </div>
         <div class="control-row">
           <label>Rotation X:</label>
           <input
@@ -142,6 +168,7 @@
 import { ref, onMounted } from "vue";
 import * as THREE from "three";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
+import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
 
 const canvas = ref(null);
 let scene, camera, renderer, controls, loadedObject, wireframeObject;
@@ -151,11 +178,16 @@ const scale = ref(1);
 const fillColor = ref("#6366f1");
 const strokeColor = ref("#000000");
 const showWireframe = ref(false);
-const strokeWidth = ref(1);
-const info = ref("Load an OBJ file to get started");
+const strokeWidth = ref(2);
+const extrusionDepth = ref(5);
+const isSVGLoaded = ref(false);
+const info = ref("Load an OBJ or SVG file to get started");
 
 let isDragging = false;
+let isPanning = false;
 let previousMousePosition = { x: 0, y: 0 };
+let cameraZoom = 1;
+let shiftPressed = false;
 
 onMounted(() => {
   initThreeScene();
@@ -212,31 +244,99 @@ function setupMouseControls() {
   renderer.domElement.addEventListener("mousedown", onMouseDown);
   renderer.domElement.addEventListener("mousemove", onMouseMove);
   renderer.domElement.addEventListener("mouseup", onMouseUp);
+  renderer.domElement.addEventListener("wheel", onMouseWheel, { passive: false });
+  renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+  
+  // Keyboard controls for trackpad users
+  document.addEventListener("keydown", onKeyDown);
+  document.addEventListener("keyup", onKeyUp);
+}
+
+function onKeyDown(e) {
+  if (e.shiftKey) {
+    shiftPressed = true;
+  }
+}
+
+function onKeyUp(e) {
+  if (!e.shiftKey) {
+    shiftPressed = false;
+    isPanning = false;
+  }
 }
 
 function onMouseDown(e) {
-  isDragging = true;
+  if (e.button === 0) {
+    // Left click
+    if (shiftPressed) {
+      // Shift + left click = pan (trackpad friendly)
+      isPanning = true;
+    } else {
+      // Left click alone = rotate
+      isDragging = true;
+    }
+  } else if (e.button === 2) {
+    // Right click = pan (mouse friendly)
+    isPanning = true;
+  }
   previousMousePosition = { x: e.clientX, y: e.clientY };
 }
 
 function onMouseMove(e) {
-  if (!isDragging || !loadedObject) return;
+  if (!loadedObject) return;
 
   const deltaX = e.clientX - previousMousePosition.x;
   const deltaY = e.clientY - previousMousePosition.y;
 
-  loadedObject.rotation.y += deltaX * 0.01;
-  loadedObject.rotation.x += deltaY * 0.01;
+  if (isDragging) {
+    // Rotate
+    loadedObject.rotation.y += deltaX * 0.01;
+    loadedObject.rotation.x += deltaY * 0.01;
 
-  rotation.value.x = (loadedObject.rotation.x * 180) / Math.PI;
-  rotation.value.y = (loadedObject.rotation.y * 180) / Math.PI;
-  rotation.value.z = (loadedObject.rotation.z * 180) / Math.PI;
+    rotation.value.x = (loadedObject.rotation.x * 180) / Math.PI;
+    rotation.value.y = (loadedObject.rotation.y * 180) / Math.PI;
+    rotation.value.z = (loadedObject.rotation.z * 180) / Math.PI;
+  } else if (isPanning) {
+    // Pan
+    const panSpeed = 0.01 / cameraZoom;
+    loadedObject.position.x += deltaX * panSpeed;
+    loadedObject.position.y -= deltaY * panSpeed;
+    
+    if (wireframeObject) {
+      wireframeObject.position.copy(loadedObject.position);
+    }
+  }
 
   previousMousePosition = { x: e.clientX, y: e.clientY };
 }
 
 function onMouseUp() {
   isDragging = false;
+  if (!shiftPressed) {
+    isPanning = false;
+  }
+}
+
+function onMouseWheel(e) {
+  e.preventDefault();
+  
+  const zoomSpeed = 0.1;
+  if (e.deltaY < 0) {
+    // Scroll up - zoom in
+    cameraZoom *= 1 + zoomSpeed;
+    scale.value *= 1 + zoomSpeed;
+  } else {
+    // Scroll down - zoom out
+    cameraZoom /= 1 + zoomSpeed;
+    scale.value /= 1 + zoomSpeed;
+  }
+  
+  if (loadedObject) {
+    loadedObject.scale.set(scale.value, scale.value, scale.value);
+    if (wireframeObject) {
+      wireframeObject.scale.copy(loadedObject.scale);
+    }
+  }
 }
 
 function handleFileUpload(event) {
@@ -245,8 +345,12 @@ function handleFileUpload(event) {
 
   const reader = new FileReader();
   reader.onload = (e) => {
-    const objContent = e.target.result;
-    loadOBJ(objContent, file.name);
+    const content = e.target.result;
+    if (file.name.toLowerCase().endsWith('.svg')) {
+      loadSVG(content, file.name);
+    } else if (file.name.toLowerCase().endsWith('.obj')) {
+      loadOBJ(content, file.name);
+    }
   };
   reader.readAsText(file);
 }
@@ -260,6 +364,7 @@ function loadOBJ(objContent, fileName) {
     scene.remove(wireframeObject);
   }
 
+  isSVGLoaded.value = false;
   const loader = new OBJLoader();
   try {
     loadedObject = loader.parse(objContent);
@@ -299,10 +404,81 @@ function loadOBJ(objContent, fileName) {
 
     rotation.value = { x: 0, y: 0, z: 0 };
     scale.value = 1;
+    cameraZoom = 1;
     info.value = `Loaded: ${fileName}`;
   } catch (error) {
     info.value = `Error loading file: ${error.message}`;
     console.error("Error loading OBJ:", error);
+  }
+}
+
+function loadSVG(svgContent, fileName) {
+  // Remove previous objects
+  if (loadedObject) {
+    scene.remove(loadedObject);
+  }
+  if (wireframeObject) {
+    scene.remove(wireframeObject);
+  }
+
+  isSVGLoaded.value = true;
+  const loader = new SVGLoader();
+  
+  try {
+    const svgData = loader.parse(svgContent);
+    loadedObject = new THREE.Group();
+
+    const paths = svgData.paths;
+    
+    paths.forEach((path) => {
+      const shapes = SVGLoader.createShapes(path);
+      
+      shapes.forEach((shape) => {
+        const geometry = new THREE.ExtrudeGeometry(shape, {
+          depth: extrusionDepth.value,
+          bevelEnabled: false,
+        });
+
+        const material = new THREE.MeshPhongMaterial({
+          color: fillColor.value,
+          specular: 0x111111,
+          shininess: 200,
+        });
+
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        loadedObject.add(mesh);
+      });
+    });
+
+    // Center and scale the object
+    const box = new THREE.Box3().setFromObject(loadedObject);
+    const center = box.getCenter(new THREE.Vector3());
+    loadedObject.position.sub(center);
+
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const scale_factor = 1.5 / maxDim;
+    loadedObject.scale.multiplyScalar(scale_factor);
+
+    // Rotate to face camera properly
+    loadedObject.rotation.x = -Math.PI / 2;
+
+    scene.add(loadedObject);
+
+    // Create wireframe version if needed
+    if (showWireframe.value) {
+      createWireframe();
+    }
+
+    rotation.value = { x: -90, y: 0, z: 0 };
+    scale.value = 1;
+    cameraZoom = 1;
+    info.value = `Loaded: ${fileName} (use Extrusion Depth to adjust 3D effect)`;
+  } catch (error) {
+    info.value = `Error loading SVG: ${error.message}`;
+    console.error("Error loading SVG:", error);
   }
 }
 
@@ -394,15 +570,90 @@ function updateScale() {
   }
 }
 
+function updateExtrusion() {
+  if (isSVGLoaded.value && loadedObject) {
+    // Reload the SVG with new extrusion depth
+    const fileInput = document.querySelector('.file-input');
+    if (fileInput && fileInput.files.length > 0) {
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target.result;
+        // Temporarily remove old object
+        scene.remove(loadedObject);
+        if (wireframeObject) scene.remove(wireframeObject);
+        
+        // Reload with new depth
+        const loader = new SVGLoader();
+        try {
+          const svgData = loader.parse(content);
+          loadedObject = new THREE.Group();
+
+          const paths = svgData.paths;
+          
+          paths.forEach((path) => {
+            const shapes = SVGLoader.createShapes(path);
+            
+            shapes.forEach((shape) => {
+              const geometry = new THREE.ExtrudeGeometry(shape, {
+                depth: extrusionDepth.value,
+                bevelEnabled: false,
+              });
+
+              const material = new THREE.MeshPhongMaterial({
+                color: fillColor.value,
+                specular: 0x111111,
+                shininess: 200,
+              });
+
+              const mesh = new THREE.Mesh(geometry, material);
+              mesh.castShadow = true;
+              mesh.receiveShadow = true;
+              loadedObject.add(mesh);
+            });
+          });
+
+          // Center and scale
+          const box = new THREE.Box3().setFromObject(loadedObject);
+          const center = box.getCenter(new THREE.Vector3());
+          loadedObject.position.sub(center);
+
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const scale_factor = 1.5 / maxDim;
+          loadedObject.scale.multiplyScalar(scale_factor);
+          loadedObject.rotation.x = -Math.PI / 2;
+
+          scene.add(loadedObject);
+
+          if (showWireframe.value) {
+            createWireframe();
+          }
+        } catch (error) {
+          console.error("Error updating SVG extrusion:", error);
+        }
+      };
+      reader.readAsText(file);
+    }
+  }
+}
+
 function resetView() {
   rotation.value = { x: 0, y: 0, z: 0 };
   scale.value = 1;
+  cameraZoom = 1;
   if (loadedObject) {
     loadedObject.rotation.set(0, 0, 0);
     loadedObject.scale.set(1, 1, 1);
+    loadedObject.position.set(0, 0, 0);
+    if (isSVGLoaded.value) {
+      loadedObject.rotation.x = -Math.PI / 2;
+      rotation.value.x = -90;
+    }
     if (wireframeObject) {
-      wireframeObject.rotation.set(0, 0, 0);
-      wireframeObject.scale.set(1, 1, 1);
+      wireframeObject.rotation.copy(loadedObject.rotation);
+      wireframeObject.scale.copy(loadedObject.scale);
+      wireframeObject.position.copy(loadedObject.position);
     }
   }
   info.value = "View reset";
@@ -482,7 +733,11 @@ function onWindowResize() {
 .help-text {
   margin: 8px 0 0 0;
   font-size: 12px;
-  color: #9ca3af;
+  color: #6b7280;
+  line-height: 1.6;
+  padding: 8px;
+  background-color: #f3f4f6;
+  border-radius: 4px;
 }
 
 .control-row {
