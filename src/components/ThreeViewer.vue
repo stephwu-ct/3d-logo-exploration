@@ -21,7 +21,7 @@ const canvasRef            = ref(null);
 const fileInputRef         = ref(null);
 const containerRef         = ref(null);
 const info                 = ref('');
-const showPreviewsReactive = ref(false);
+const showPreviewsReactive = ref(true);
 
 // ─── Two-level group hierarchy ────────────────────────────────
 //
@@ -119,8 +119,9 @@ const PARAMS = {
   // pivot offset (loadedObject)
   pivotX: 0, pivotY: 0, pivotZ: 0,
   // preview strip
-  showPreviews: false,
-  showGrid:     false,
+  showPreviews:     true,
+  showGrid:         false,
+  hideBodyCrossbar: false,
 };
 
 const SNAPSHOT_KEYS = [
@@ -128,7 +129,7 @@ const SNAPSHOT_KEYS = [
   'showFoundation','foundationColor','foundationWeight','foundationOpacity',
   'extrusionDepth','stemHeight',
   'rotX','rotY','rotZ','shapeW','shapeH','shapeD','panX','panY',
-  'pivotX','pivotY','pivotZ','showGrid',
+  'pivotX','pivotY','pivotZ','showGrid','hideBodyCrossbar',
 ];
 
 let cachedSVGPaths    = null;
@@ -318,6 +319,8 @@ function initPane() {
   stemBinding = matFolder
     .addBinding(PARAMS, 'stemHeight', { label: 'Stem Height', min: 0.5, max: 8, step: 0.1 })
     .on('change', () => { rebuildDefaultLogo(); scheduleSnapshot(); });
+  matFolder.addBinding(PARAMS, 'hideBodyCrossbar', { label: 'Hide Back Crossbar' })
+    .on('change', () => { rebuildEdges(); scheduleSnapshot(); });
 
   // Foundation — thin ghost skeleton always drawn beneath the artwork
   const foundFolder = pane.addFolder({ title: 'Foundation', expanded: true });
@@ -422,6 +425,25 @@ function getStemArtworkPositions(mesh) {
   return new Float32Array(filtered);
 }
 
+// Returns edge positions for the box body with the back-face crossbar removed.
+// The crossbar is the top edge of the left face: both endpoints at x≈-W, y≈H.
+// Only the single horizontal segment that crosses the back vertical edge of the
+// 6 is removed — all other top-face edges are kept.
+function getBodyArtworkPositions(mesh) {
+  const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, PARAMS.edgeAngle);
+  const src = edgesGeo.attributes.position.array;
+  const W = PARAMS.shapeW, H = PARAMS.shapeH;
+  const filtered = [];
+  for (let i = 0; i < src.length; i += 6) {
+    const x1 = src[i],   y1 = src[i + 1];
+    const x2 = src[i + 3], y2 = src[i + 4];
+    if (Math.abs(x1 + W) < 0.001 && Math.abs(y1 - H) < 0.001 &&
+        Math.abs(x2 + W) < 0.001 && Math.abs(y2 - H) < 0.001) continue;
+    filtered.push(src[i], src[i+1], src[i+2], src[i+3], src[i+4], src[i+5]);
+  }
+  return new Float32Array(filtered);
+}
+
 function applyEdgeMode(group) {
   const meshes = [];
   group.traverse((child) => {
@@ -432,7 +454,9 @@ function applyEdgeMode(group) {
 
     const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, PARAMS.edgeAngle);
     const allPositions = edgesGeo.attributes.position.array;
-    const artPositions = mesh.userData.isStem ? getStemArtworkPositions(mesh) : allPositions;
+    const artPositions = mesh.userData.isStem  ? getStemArtworkPositions(mesh) :
+                         mesh.userData.isBody && PARAMS.hideBodyCrossbar ? getBodyArtworkPositions(mesh) :
+                         allPositions;
 
     // Artwork layer — thick stroke, rendered first (renderOrder 0)
     const lineGeo = new LineSegmentsGeometry();
@@ -530,9 +554,9 @@ function rebuildEdges() {
       const line = meshToLine.get(child);
       if (!line) return;
       const edgesGeo   = new THREE.EdgesGeometry(child.geometry, PARAMS.edgeAngle);
-      const newPositions = child.userData.isStem
-        ? getStemArtworkPositions(child)
-        : edgesGeo.attributes.position.array;
+      const newPositions = child.userData.isStem  ? getStemArtworkPositions(child) :
+                           child.userData.isBody && PARAMS.hideBodyCrossbar ? getBodyArtworkPositions(child) :
+                           edgesGeo.attributes.position.array;
       const newGeo = new LineSegmentsGeometry();
       newGeo.setPositions(newPositions);
       line.geometry.dispose();
@@ -547,6 +571,7 @@ function buildDefaultGroup() {
   const dummy = new THREE.MeshBasicMaterial({ visible: false });
   const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD;
   const body = new THREE.Mesh(new THREE.BoxGeometry(W * 2, H * 2, D * 2), dummy);
+  body.userData.isBody = true;
   // Stem sits on the YZ plane at x = -W (the left face of the box).
   // Its width spans the full depth of the box (D*2) so it lines up flush.
   const stem = new THREE.Mesh(new THREE.PlaneGeometry(D * 2, PARAMS.stemHeight), dummy);
