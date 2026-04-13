@@ -10,6 +10,61 @@
           @change="handleFileUpload"
           class="file-input"
         />
+        <p class="help-text">Supported: OBJ files</p>
+      </div>
+
+      <div class="control-group">
+        <h3>Material & Colors</h3>
+        <div class="control-row">
+          <label>Fill Color:</label>
+          <div class="color-input-wrapper">
+            <input
+              v-model="fillColor"
+              type="color"
+              @input="updateMaterialColor"
+              class="color-input"
+            />
+            <span class="color-value">{{ fillColor }}</span>
+          </div>
+        </div>
+        
+        <div class="control-row">
+          <label>Wireframe:</label>
+          <input
+            v-model="showWireframe"
+            type="checkbox"
+            @change="updateWireframe"
+            class="checkbox"
+          />
+          <span>{{ showWireframe ? 'ON' : 'OFF' }}</span>
+        </div>
+
+        <div v-if="showWireframe" class="control-row">
+          <label>Stroke Color:</label>
+          <div class="color-input-wrapper">
+            <input
+              v-model="strokeColor"
+              type="color"
+              @input="updateWireframeColor"
+              class="color-input"
+            />
+            <span class="color-value">{{ strokeColor }}</span>
+          </div>
+        </div>
+
+        <div v-if="showWireframe" class="control-row">
+          <label>Stroke Thickness:</label>
+          <input
+            v-model.number="strokeWidth"
+            type="range"
+            min="0.5"
+            max="3"
+            step="0.1"
+            @input="updateWireframeWidth"
+            class="slider"
+          />
+          <span class="value">{{ strokeWidth.toFixed(1) }}px</span>
+        </div>
       </div>
 
       <div class="control-group">
@@ -89,10 +144,14 @@ import * as THREE from "three";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 
 const canvas = ref(null);
-let scene, camera, renderer, controls, loadedObject;
+let scene, camera, renderer, controls, loadedObject, wireframeObject;
 
 const rotation = ref({ x: 0, y: 0, z: 0 });
 const scale = ref(1);
+const fillColor = ref("#6366f1");
+const strokeColor = ref("#000000");
+const showWireframe = ref(false);
+const strokeWidth = ref(1);
 const info = ref("Load an OBJ file to get started");
 
 let isDragging = false;
@@ -142,7 +201,7 @@ function initThreeScene() {
   const gridHelper = new THREE.GridHelper(10, 10, 0xcccccc, 0xeeeeee);
   scene.add(gridHelper);
 
-  // Simple orbit controls via mouse
+  // Mouse controls
   setupMouseControls();
 
   // Animation loop
@@ -166,11 +225,9 @@ function onMouseMove(e) {
   const deltaX = e.clientX - previousMousePosition.x;
   const deltaY = e.clientY - previousMousePosition.y;
 
-  // Rotate object based on mouse movement
   loadedObject.rotation.y += deltaX * 0.01;
   loadedObject.rotation.x += deltaY * 0.01;
 
-  // Update the rotation values
   rotation.value.x = (loadedObject.rotation.x * 180) / Math.PI;
   rotation.value.y = (loadedObject.rotation.y * 180) / Math.PI;
   rotation.value.z = (loadedObject.rotation.z * 180) / Math.PI;
@@ -195,9 +252,12 @@ function handleFileUpload(event) {
 }
 
 function loadOBJ(objContent, fileName) {
-  // Remove previous object
+  // Remove previous objects
   if (loadedObject) {
     scene.remove(loadedObject);
+  }
+  if (wireframeObject) {
+    scene.remove(wireframeObject);
   }
 
   const loader = new OBJLoader();
@@ -220,7 +280,7 @@ function loadOBJ(objContent, fileName) {
       if (child.isMesh) {
         if (!child.material) {
           child.material = new THREE.MeshPhongMaterial({
-            color: 0x6366f1,
+            color: fillColor.value,
             specular: 0x111111,
             shininess: 200,
           });
@@ -231,6 +291,12 @@ function loadOBJ(objContent, fileName) {
     });
 
     scene.add(loadedObject);
+    
+    // Create wireframe version if needed
+    if (showWireframe.value) {
+      createWireframe();
+    }
+
     rotation.value = { x: 0, y: 0, z: 0 };
     scale.value = 1;
     info.value = `Loaded: ${fileName}`;
@@ -240,17 +306,91 @@ function loadOBJ(objContent, fileName) {
   }
 }
 
+function updateMaterialColor() {
+  if (loadedObject) {
+    loadedObject.traverse((child) => {
+      if (child.isMesh && child.material) {
+        child.material.color.setStyle(fillColor.value);
+      }
+    });
+  }
+}
+
+function createWireframe() {
+  if (wireframeObject) {
+    scene.remove(wireframeObject);
+  }
+
+  wireframeObject = new THREE.Group();
+  
+  loadedObject.traverse((child) => {
+    if (child.isMesh) {
+      const edges = new THREE.EdgesGeometry(child.geometry);
+      const line = new THREE.LineSegments(
+        edges,
+        new THREE.LineBasicMaterial({ color: strokeColor.value, linewidth: strokeWidth.value })
+      );
+      wireframeObject.add(line);
+    }
+  });
+
+  // Copy position, rotation, and scale
+  wireframeObject.position.copy(loadedObject.position);
+  wireframeObject.rotation.copy(loadedObject.rotation);
+  wireframeObject.scale.copy(loadedObject.scale);
+
+  scene.add(wireframeObject);
+}
+
+function updateWireframe() {
+  if (loadedObject) {
+    if (showWireframe.value) {
+      createWireframe();
+    } else if (wireframeObject) {
+      scene.remove(wireframeObject);
+      wireframeObject = null;
+    }
+  }
+}
+
+function updateWireframeColor() {
+  if (wireframeObject) {
+    wireframeObject.traverse((child) => {
+      if (child.material) {
+        child.material.color.setStyle(strokeColor.value);
+      }
+    });
+  }
+}
+
+function updateWireframeWidth() {
+  if (wireframeObject) {
+    wireframeObject.traverse((child) => {
+      if (child.material && child.material.linewidth !== undefined) {
+        child.material.linewidth = strokeWidth.value;
+      }
+    });
+  }
+}
+
 function updateRotation() {
   if (loadedObject) {
     loadedObject.rotation.x = (rotation.value.x * Math.PI) / 180;
     loadedObject.rotation.y = (rotation.value.y * Math.PI) / 180;
     loadedObject.rotation.z = (rotation.value.z * Math.PI) / 180;
+    
+    if (wireframeObject) {
+      wireframeObject.rotation.copy(loadedObject.rotation);
+    }
   }
 }
 
 function updateScale() {
   if (loadedObject) {
     loadedObject.scale.set(scale.value, scale.value, scale.value);
+    if (wireframeObject) {
+      wireframeObject.scale.copy(loadedObject.scale);
+    }
   }
 }
 
@@ -260,6 +400,10 @@ function resetView() {
   if (loadedObject) {
     loadedObject.rotation.set(0, 0, 0);
     loadedObject.scale.set(1, 1, 1);
+    if (wireframeObject) {
+      wireframeObject.rotation.set(0, 0, 0);
+      wireframeObject.scale.set(1, 1, 1);
+    }
   }
   info.value = "View reset";
 }
@@ -307,7 +451,7 @@ function onWindowResize() {
 }
 
 .controls-panel {
-  width: 300px;
+  width: 320px;
   background-color: #ffffff;
   border-radius: 8px;
   padding: 20px;
@@ -333,6 +477,12 @@ function onWindowResize() {
   color: #374151;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+.help-text {
+  margin: 8px 0 0 0;
+  font-size: 12px;
+  color: #9ca3af;
 }
 
 .control-row {
@@ -385,6 +535,34 @@ function onWindowResize() {
   font-size: 12px;
   color: #9ca3af;
   font-weight: 500;
+}
+
+.color-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.color-input {
+  width: 50px;
+  height: 32px;
+  border: 2px solid #e5e7eb;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.color-value {
+  font-size: 12px;
+  color: #9ca3af;
+  font-weight: 500;
+  min-width: 60px;
+}
+
+.checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
 }
 
 .file-input {
