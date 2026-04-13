@@ -70,6 +70,7 @@ let pane;
 let extrusionBinding, stemBinding;
 let rotXBinding, rotYBinding, rotZBinding;
 let shapeWBinding, shapeHBinding, shapeDBinding;
+let foundationWeightBinding, foundationOpacityBinding;
 
 // ─── PARAMS ───────────────────────────────────────────────────
 // Snapshotted keys: everything except animAxis/animSpeed/animPlaying
@@ -77,8 +78,14 @@ let shapeWBinding, shapeHBinding, shapeDBinding;
 const PARAMS = {
   bgColor:        '#0D2929',
   fillColor:      '#F65128',
+  showArtwork:    true,
   edgeWeight:     9.5,
   edgeAngle:      70,
+  // Foundation layer — thin wireframe drawn ON TOP (depthTest:false, renderOrder:1)
+  showFoundation:    true,
+  foundationColor:   '#ffffff',
+  foundationWeight:  1,
+  foundationOpacity: 1,
   extrusionDepth: 5,
   stemHeight:     2,
   // pose (poseGroup)
@@ -92,14 +99,17 @@ const PARAMS = {
 };
 
 const SNAPSHOT_KEYS = [
-  'bgColor','fillColor','edgeWeight','edgeAngle','extrusionDepth','stemHeight',
+  'bgColor','fillColor','showArtwork','edgeWeight','edgeAngle',
+  'showFoundation','foundationColor','foundationWeight','foundationOpacity',
+  'extrusionDepth','stemHeight',
   'rotX','rotY','rotZ','shapeW','shapeH','shapeD','panX','panY',
   'pivotX','pivotY','pivotZ',
 ];
 
-let cachedSVGPaths = null;
-let isSVGLoaded    = false;
-const meshToLine   = new WeakMap();
+let cachedSVGPaths    = null;
+let isSVGLoaded       = false;
+const meshToLine       = new WeakMap(); // mesh → artwork LineSegments2
+const meshToFoundation = new WeakMap(); // mesh → foundation LineSegments2
 
 // ─── History ──────────────────────────────────────────────────
 
@@ -148,8 +158,8 @@ function applySnapshot(snap) {
   SNAPSHOT_KEYS.forEach(k => { PARAMS[k] = snap[k]; });
   pane.refresh();
   scene.background = new THREE.Color(PARAMS.bgColor);
-  updateEdgeColor();
-  updateEdgeWeight();
+  updateArtwork();
+  updateFoundation();
   syncPose();
   rebuildShape();
   if (animGroup) animGroup.position.set(PARAMS.panX, PARAMS.panY, 0);
@@ -245,6 +255,8 @@ function initPane() {
 
   matFolder.addBinding(PARAMS, 'bgColor', { label: 'Background', view: 'color' })
     .on('change', ({ value }) => { scene.background = new THREE.Color(value); scheduleSnapshot(); });
+  matFolder.addBinding(PARAMS, 'showArtwork', { label: 'Show' })
+    .on('change', () => { updateArtwork(); scheduleSnapshot(); });
   matFolder.addBinding(PARAMS, 'fillColor', { label: 'Edge Color', view: 'color' })
     .on('change', () => { updateEdgeColor(); scheduleSnapshot(); });
   matFolder.addBinding(PARAMS, 'edgeWeight', { label: 'Edge Weight', min: 1, max: 100, step: 0.5 })
@@ -260,6 +272,17 @@ function initPane() {
   stemBinding = matFolder
     .addBinding(PARAMS, 'stemHeight', { label: 'Stem Height', min: 0.5, max: 8, step: 0.1 })
     .on('change', () => { rebuildDefaultLogo(); scheduleSnapshot(); });
+
+  // Foundation — thin ghost skeleton always drawn beneath the artwork
+  const foundFolder = pane.addFolder({ title: 'Foundation', expanded: true });
+  foundFolder.addBinding(PARAMS, 'showFoundation', { label: 'Show' })
+    .on('change', () => { updateFoundation(); scheduleSnapshot(); });
+  foundFolder.addBinding(PARAMS, 'foundationColor', { label: 'Color', view: 'color' })
+    .on('change', () => { updateFoundation(); scheduleSnapshot(); });
+  foundationWeightBinding = foundFolder.addBinding(PARAMS, 'foundationWeight', { label: 'Weight', min: 0.5, max: 10, step: 0.5 })
+    .on('change', () => { updateFoundation(); scheduleSnapshot(); });
+  foundationOpacityBinding = foundFolder.addBinding(PARAMS, 'foundationOpacity', { label: 'Opacity', min: 0, max: 1, step: 0.01 })
+    .on('change', () => { updateFoundation(); scheduleSnapshot(); });
 
   // Pose — sets the static orientation of the shape (poseGroup)
   // This is the "resting angle" that stays constant during animation.
@@ -313,6 +336,20 @@ function makeEdgeMaterial() {
   });
 }
 
+function makeFoundationMaterial() {
+  return new LineMaterial({
+    color:      new THREE.Color(PARAMS.foundationColor),
+    linewidth:  PARAMS.foundationWeight,
+    transparent: true,
+    opacity:    PARAMS.foundationOpacity,
+    depthTest:  false,        // always visible — shows back edges through the shape
+    resolution: new THREE.Vector2(
+      canvasRef.value?.clientWidth  ?? 1000,
+      canvasRef.value?.clientHeight ?? 800
+    ),
+  });
+}
+
 function applyEdgeMode(group) {
   const meshes = [];
   group.traverse((child) => {
@@ -322,26 +359,57 @@ function applyEdgeMode(group) {
     mesh.visible = false;
 
     const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, PARAMS.edgeAngle);
-    const lineGeo  = new LineSegmentsGeometry();
-    lineGeo.setPositions(edgesGeo.attributes.position.array);
+    const positions = edgesGeo.attributes.position.array;
+
+    // Artwork layer — thick stroke, rendered first (renderOrder 0)
+    const lineGeo = new LineSegmentsGeometry();
+    lineGeo.setPositions(positions);
     const line = new LineSegments2(lineGeo, makeEdgeMaterial());
     line.position.copy(mesh.position);
     line.rotation.copy(mesh.rotation);
     line.scale.copy(mesh.scale);
+    line.visible = PARAMS.showArtwork;
+    line.renderOrder = 0;
     mesh.parent.add(line);
     meshToLine.set(mesh, line);
+
+    // Foundation layer — wireframe overlay ON TOP (depthTest:false, renderOrder 1)
+    // Drawn last so it always shows over the artwork, including back edges.
+    const foundGeo = new LineSegmentsGeometry();
+    foundGeo.setPositions(positions);
+    const found = new LineSegments2(foundGeo, makeFoundationMaterial());
+    found.position.copy(mesh.position);
+    found.rotation.copy(mesh.rotation);
+    found.scale.copy(mesh.scale);
+    found.visible = PARAMS.showFoundation;
+    found.renderOrder = 1;
+    mesh.parent.add(found);
+    meshToFoundation.set(mesh, found);
   });
 }
 
-function updateEdgeColor() {
+function updateArtwork() {
   loadedObject?.traverse((child) => {
-    if (child.isLineSegments2) child.material.color.setStyle(PARAMS.fillColor);
+    if (child.isLineSegments2 && child.renderOrder === 0) {
+      child.material.color.setStyle(PARAMS.fillColor);
+      child.material.linewidth = PARAMS.edgeWeight;
+      child.visible = PARAMS.showArtwork;
+    }
   });
 }
 
-function updateEdgeWeight() {
+function updateEdgeColor() { updateArtwork(); }
+
+function updateEdgeWeight() { updateArtwork(); }
+
+function updateFoundation() {
   loadedObject?.traverse((child) => {
-    if (child.isLineSegments2) child.material.linewidth = PARAMS.edgeWeight;
+    if (child.isLineSegments2 && child.renderOrder === 1) {
+      child.material.color.setStyle(PARAMS.foundationColor);
+      child.material.linewidth = PARAMS.foundationWeight;
+      child.material.opacity   = PARAMS.foundationOpacity;
+      child.visible            = PARAMS.showFoundation;
+    }
   });
 }
 
@@ -740,7 +808,7 @@ function onWindowResize() {
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   loadedObject?.traverse((child) => {
-    if (child.isLineSegments2) child.material.resolution.set(w, h);
+    if (child.isLineSegments2) child.material.resolution?.set(w, h);
   });
 }
 </script>
