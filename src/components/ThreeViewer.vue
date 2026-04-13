@@ -1,6 +1,7 @@
 <template>
-  <div class="viewer-container">
+  <div ref="containerRef" class="viewer-container">
     <div ref="canvasRef" class="canvas-container"></div>
+    <div v-if="showPreviewsReactive" class="panel-divider"></div>
     <input ref="fileInputRef" type="file" accept=".obj,.svg" @change="handleFileUpload" style="display:none" />
     <div v-if="info" class="info-bar">{{ info }}</div>
   </div>
@@ -16,9 +17,11 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { LineMaterial }         from 'three/examples/jsm/lines/LineMaterial.js';
 import { Pane } from 'tweakpane';
 
-const canvasRef    = ref(null);
-const fileInputRef = ref(null);
-const info         = ref('');
+const canvasRef            = ref(null);
+const fileInputRef         = ref(null);
+const containerRef         = ref(null);
+const info                 = ref('');
+const showPreviewsReactive = ref(false);
 
 // ─── Two-level group hierarchy ────────────────────────────────
 //
@@ -35,6 +38,7 @@ let scene, camera, renderer;
 let animGroup    = null;   // animation / scale / pan target
 let poseGroup    = null;   // manual orientation target
 let loadedObject = null;   // geometry; pivot offset on .position
+let gridGroup    = null;   // fixed XY grid guides — hidden in preview cells
 let animationFrameId = null;
 let lastFrameTime    = null;
 
@@ -55,9 +59,27 @@ const SPRING = { stiffness: 50, damping: 12, mass: 1 };
 
 const FRUSTUM_SIZE = 4;
 const DEG2RAD      = Math.PI / 180;
+// Reference height for linewidth normalization. PARAMS.edgeWeight is expressed
+// in pixels-at-800px. At any other height the linewidth scales proportionally
+// so the stroke looks the same size relative to the logo.
+const REFERENCE_H  = 800;
 
 // Default pose — matches the saved preset so Reset View returns here.
 const DEFAULT_ROT_X = 0, DEFAULT_ROT_Y = 45, DEFAULT_ROT_Z = -45;
+
+// Preview strip — 4 color schemes rendered via scissor into the same canvas.
+// Green/orange use the same values as the main PARAMS defaults.
+const PREVIEW_SCHEMES = [
+  { bg: '#FFFFFF', stroke: '#000000' },  // white bg, black stroke
+  { bg: '#000000', stroke: '#FFFFFF' },  // black bg, white stroke
+  { bg: '#0D2929', stroke: '#F65128' },  // brand bg + orange (default view)
+  { bg: '#F65128', stroke: '#0D2929' },  // orange bg, brand dark stroke
+];
+
+// Cached flat arrays of materials — populated by collectMaterials() after
+// any applyEdgeMode / rebuild. Avoids per-frame scene traversal.
+let artworkMaterials    = [];
+let foundationMaterials = [];
 
 // ─── Interaction ──────────────────────────────────────────────
 let isDragging = false;
@@ -82,7 +104,7 @@ const PARAMS = {
   edgeWeight:     9.5,
   edgeAngle:      70,
   // Foundation layer — thin wireframe drawn ON TOP (depthTest:false, renderOrder:1)
-  showFoundation:    true,
+  showFoundation:    false,
   foundationColor:   '#ffffff',
   foundationWeight:  1,
   foundationOpacity: 1,
@@ -96,6 +118,9 @@ const PARAMS = {
   panX: 0, panY: 0,
   // pivot offset (loadedObject)
   pivotX: 0, pivotY: 0, pivotZ: 0,
+  // preview strip
+  showPreviews: false,
+  showGrid:     false,
 };
 
 const SNAPSHOT_KEYS = [
@@ -103,7 +128,7 @@ const SNAPSHOT_KEYS = [
   'showFoundation','foundationColor','foundationWeight','foundationOpacity',
   'extrusionDepth','stemHeight',
   'rotX','rotY','rotZ','shapeW','shapeH','shapeD','panX','panY',
-  'pivotX','pivotY','pivotZ',
+  'pivotX','pivotY','pivotZ','showGrid',
 ];
 
 let cachedSVGPaths    = null;
@@ -164,7 +189,21 @@ function applySnapshot(snap) {
   rebuildShape();
   if (animGroup) animGroup.position.set(PARAMS.panX, PARAMS.panY, 0);
   applyPivotOffset();
+  if (gridGroup) gridGroup.visible = PARAMS.showGrid;
   lastSnapshotJson = makeSnapshotJson();
+}
+
+// ─── Panel layout ─────────────────────────────────────────────
+// Sets --strip-h on the container so the panel-divider CSS can position
+// the gap between the main viewport and the preview strip panels.
+
+function updateStripHeight() {
+  if (!containerRef.value || !canvasRef.value) return;
+  const cw = canvasRef.value.clientWidth;
+  const h  = PARAMS.showPreviews
+    ? Math.round(Math.min(220, cw / PREVIEW_SCHEMES.length))
+    : 0;
+  containerRef.value.style.setProperty('--strip-h', h + 'px');
 }
 
 // ─── Lifecycle ────────────────────────────────────────────────
@@ -175,6 +214,7 @@ onMounted(() => {
   window.addEventListener('resize', onWindowResize);
   loadDefaultLogo();
   commitSnapshot();
+  updateStripHeight();
 });
 
 onUnmounted(() => {
@@ -236,7 +276,9 @@ function initScene() {
   renderer.setPixelRatio(window.devicePixelRatio);
   canvasRef.value.appendChild(renderer.domElement);
 
-  scene.add(createGridGuides());
+  gridGroup = createGridGuides();
+  gridGroup.visible = PARAMS.showGrid;
+  scene.add(gridGroup);
   setupMouseControls();
   animate();
 }
@@ -249,6 +291,10 @@ function initPane() {
   pane.addButton({ title: 'Load File  (OBJ / SVG)' }).on('click', () => {
     fileInputRef.value.click();
   });
+  pane.addBinding(PARAMS, 'showPreviews', { label: 'Color Previews' })
+    .on('change', () => { showPreviewsReactive.value = PARAMS.showPreviews; updateStripHeight(); onWindowResize(); });
+  pane.addBinding(PARAMS, 'showGrid', { label: 'Show Grid' })
+    .on('change', () => { if (gridGroup) gridGroup.visible = PARAMS.showGrid; scheduleSnapshot(); });
 
   // Material
   const matFolder = pane.addFolder({ title: 'Material', expanded: true });
@@ -325,10 +371,21 @@ function initPane() {
 
 // ─── Edge rendering ───────────────────────────────────────────
 
+// Returns linewidth scaled so the stroke is visually consistent at any
+// viewport size. weight is expressed in pixels at REFERENCE_H (800px).
+function scaledLinewidth(weight) {
+  if (!canvasRef.value) return weight;
+  const h = canvasRef.value.clientHeight;
+  const mainH = PARAMS.showPreviews
+    ? h - Math.round(Math.min(220, canvasRef.value.clientWidth / PREVIEW_SCHEMES.length))
+    : h;
+  return weight * (mainH / REFERENCE_H);
+}
+
 function makeEdgeMaterial() {
   return new LineMaterial({
     color:     new THREE.Color(PARAMS.fillColor),
-    linewidth: PARAMS.edgeWeight,
+    linewidth: scaledLinewidth(PARAMS.edgeWeight),
     resolution: new THREE.Vector2(
       canvasRef.value?.clientWidth  ?? 1000,
       canvasRef.value?.clientHeight ?? 800
@@ -339,7 +396,7 @@ function makeEdgeMaterial() {
 function makeFoundationMaterial() {
   return new LineMaterial({
     color:      new THREE.Color(PARAMS.foundationColor),
-    linewidth:  PARAMS.foundationWeight,
+    linewidth:  scaledLinewidth(PARAMS.foundationWeight),
     transparent: true,
     opacity:    PARAMS.foundationOpacity,
     depthTest:  false,        // always visible — shows back edges through the shape
@@ -348,6 +405,21 @@ function makeFoundationMaterial() {
       canvasRef.value?.clientHeight ?? 800
     ),
   });
+}
+
+// Returns edge positions for the stem with the bottom edge (crossbar) removed.
+// The crossbar sits at y = -stemHeight/2 in the stem's local space and creates
+// a horizontal line across the back of the six — remove from artwork, keep in foundation.
+function getStemArtworkPositions(mesh) {
+  const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, PARAMS.edgeAngle);
+  const src = edgesGeo.attributes.position.array;
+  const minY = -PARAMS.stemHeight / 2;
+  const filtered = [];
+  for (let i = 0; i < src.length; i += 6) {
+    if (Math.abs(src[i + 1] - minY) < 0.001 && Math.abs(src[i + 4] - minY) < 0.001) continue;
+    filtered.push(src[i], src[i+1], src[i+2], src[i+3], src[i+4], src[i+5]);
+  }
+  return new Float32Array(filtered);
 }
 
 function applyEdgeMode(group) {
@@ -359,11 +431,12 @@ function applyEdgeMode(group) {
     mesh.visible = false;
 
     const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, PARAMS.edgeAngle);
-    const positions = edgesGeo.attributes.position.array;
+    const allPositions = edgesGeo.attributes.position.array;
+    const artPositions = mesh.userData.isStem ? getStemArtworkPositions(mesh) : allPositions;
 
     // Artwork layer — thick stroke, rendered first (renderOrder 0)
     const lineGeo = new LineSegmentsGeometry();
-    lineGeo.setPositions(positions);
+    lineGeo.setPositions(artPositions);
     const line = new LineSegments2(lineGeo, makeEdgeMaterial());
     line.position.copy(mesh.position);
     line.rotation.copy(mesh.rotation);
@@ -376,7 +449,7 @@ function applyEdgeMode(group) {
     // Foundation layer — wireframe overlay ON TOP (depthTest:false, renderOrder 1)
     // Drawn last so it always shows over the artwork, including back edges.
     const foundGeo = new LineSegmentsGeometry();
-    foundGeo.setPositions(positions);
+    foundGeo.setPositions(allPositions);
     const found = new LineSegments2(foundGeo, makeFoundationMaterial());
     found.position.copy(mesh.position);
     found.rotation.copy(mesh.rotation);
@@ -386,13 +459,14 @@ function applyEdgeMode(group) {
     mesh.parent.add(found);
     meshToFoundation.set(mesh, found);
   });
+  collectMaterials();
 }
 
 function updateArtwork() {
   loadedObject?.traverse((child) => {
     if (child.isLineSegments2 && child.renderOrder === 0) {
       child.material.color.setStyle(PARAMS.fillColor);
-      child.material.linewidth = PARAMS.edgeWeight;
+      child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
       child.visible = PARAMS.showArtwork;
     }
   });
@@ -406,11 +480,47 @@ function updateFoundation() {
   loadedObject?.traverse((child) => {
     if (child.isLineSegments2 && child.renderOrder === 1) {
       child.material.color.setStyle(PARAMS.foundationColor);
-      child.material.linewidth = PARAMS.foundationWeight;
+      child.material.linewidth = scaledLinewidth(PARAMS.foundationWeight);
       child.material.opacity   = PARAMS.foundationOpacity;
       child.visible            = PARAMS.showFoundation;
     }
   });
+}
+
+// ─── Multi-viewport helpers ───────────────────────────────────
+
+// Rebuild flat material arrays after any geometry/material change.
+// Used by preview rendering to swap colors without traversal per frame.
+function collectMaterials() {
+  artworkMaterials    = [];
+  foundationMaterials = [];
+  loadedObject?.traverse((child) => {
+    if (!child.isLineSegments2) return;
+    (child.renderOrder === 0 ? artworkMaterials : foundationMaterials).push(child.material);
+  });
+}
+
+function setCameraAspect(aspect) {
+  camera.left   = (-FRUSTUM_SIZE * aspect) / 2;
+  camera.right  = ( FRUSTUM_SIZE * aspect) / 2;
+  camera.top    =  FRUSTUM_SIZE / 2;
+  camera.bottom = -FRUSTUM_SIZE / 2;
+  camera.updateProjectionMatrix();
+}
+
+// Temporarily override all line colors for a preview render.
+function applySchemeColors(stroke) {
+  const c = new THREE.Color(stroke);
+  artworkMaterials.forEach(m    => { if (m) m.color.copy(c); });
+  foundationMaterials.forEach(m => { if (m) m.color.copy(c); });
+}
+
+// Restore to the user's chosen colors after a preview render.
+function restoreMainColors() {
+  const ac = new THREE.Color(PARAMS.fillColor);
+  const fc = new THREE.Color(PARAMS.foundationColor);
+  artworkMaterials.forEach(m    => { if (m) m.color.copy(ac); });
+  foundationMaterials.forEach(m => { if (m) m.color.copy(fc); });
 }
 
 function rebuildEdges() {
@@ -419,9 +529,12 @@ function rebuildEdges() {
     if (child.isMesh && !child.isLineSegments2) {
       const line = meshToLine.get(child);
       if (!line) return;
-      const edgesGeo = new THREE.EdgesGeometry(child.geometry, PARAMS.edgeAngle);
-      const newGeo   = new LineSegmentsGeometry();
-      newGeo.setPositions(edgesGeo.attributes.position.array);
+      const edgesGeo   = new THREE.EdgesGeometry(child.geometry, PARAMS.edgeAngle);
+      const newPositions = child.userData.isStem
+        ? getStemArtworkPositions(child)
+        : edgesGeo.attributes.position.array;
+      const newGeo = new LineSegmentsGeometry();
+      newGeo.setPositions(newPositions);
       line.geometry.dispose();
       line.geometry = newGeo;
     }
@@ -439,6 +552,7 @@ function buildDefaultGroup() {
   const stem = new THREE.Mesh(new THREE.PlaneGeometry(D * 2, PARAMS.stemHeight), dummy);
   stem.rotation.y = -Math.PI / 2;
   stem.position.set(-W, H + PARAMS.stemHeight / 2, 0);
+  stem.userData.isStem = true;
   const group = new THREE.Group();
   group.add(body, stem);
   return group;
@@ -788,27 +902,90 @@ function animate() {
   animationFrameId = requestAnimationFrame(animate);
 
   const now = performance.now();
-  // Cap dt at 50ms so a tab wake-up doesn't explode the spring
   const dt  = lastFrameTime ? Math.min((now - lastFrameTime) / 1000, 0.05) : 0;
   lastFrameTime = now;
 
   if (spring.active && animGroup) stepSpring(dt);
 
+  const cw = canvasRef.value.clientWidth;
+  const ch = canvasRef.value.clientHeight;
+
+  if (!PARAMS.showPreviews) {
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, cw, ch);
+    setCameraAspect(cw / ch);
+    renderer.render(scene, camera);
+    return;
+  }
+
+  // Preview strip height: one cell wide = cw/4, capped at 220px.
+  const N       = PREVIEW_SCHEMES.length;
+  const STRIP_H = Math.round(Math.min(220, cw / N));
+  const MAIN_H  = ch - STRIP_H;
+  const cellW   = Math.round(cw / N);
+
+  renderer.setScissorTest(true);
+
+  // ── Main viewport (top portion) ──────────────────────────────
+  renderer.setViewport(0, STRIP_H, cw, MAIN_H);
+  renderer.setScissor(0, STRIP_H, cw, MAIN_H);
+  setCameraAspect(cw / MAIN_H);
   renderer.render(scene, camera);
+
+  // ── Preview cells (bottom strip) ─────────────────────────────
+  // Hide grid + set resolution to cell size so line weight is proportional.
+  if (gridGroup) gridGroup.visible = false;
+  const allLineMats = [...artworkMaterials, ...foundationMaterials];
+  allLineMats.forEach(m => m.resolution?.set(cellW, STRIP_H));
+  // LineMaterial.linewidth is in screen-space pixels. The preview strip is
+  // shorter than the main viewport, so the logo appears smaller while the
+  // stroke stays the same absolute pixel width — making it look too heavy.
+  // Scale linewidth by the height ratio to keep strokes visually proportional.
+  const wScale = STRIP_H / MAIN_H;
+  artworkMaterials.forEach(m    => { if (m) m.linewidth = scaledLinewidth(PARAMS.edgeWeight)       * wScale; });
+  foundationMaterials.forEach(m => { if (m) m.linewidth = scaledLinewidth(PARAMS.foundationWeight) * wScale; });
+
+  PREVIEW_SCHEMES.forEach(({ bg, stroke }, i) => {
+    const x = i * cellW;
+    const w = (i === N - 1) ? cw - x : cellW;
+    renderer.setViewport(x, 0, w, STRIP_H);
+    renderer.setScissor(x, 0, w, STRIP_H);
+    setCameraAspect(w / STRIP_H);
+
+    const savedBg = scene.background.getHex();
+    scene.background.setStyle(bg);
+    applySchemeColors(stroke);
+
+    renderer.render(scene, camera);
+
+    scene.background.setHex(savedBg);
+  });
+
+  // Restore grid, resolution, linewidths, colors, camera
+  if (gridGroup) gridGroup.visible = PARAMS.showGrid;
+  allLineMats.forEach(m => m.resolution?.set(cw, MAIN_H));
+  artworkMaterials.forEach(m    => { if (m) m.linewidth = scaledLinewidth(PARAMS.edgeWeight); });
+  foundationMaterials.forEach(m => { if (m) m.linewidth = scaledLinewidth(PARAMS.foundationWeight); });
+  restoreMainColors();
+  scene.background.setStyle(PARAMS.bgColor);
+  setCameraAspect(cw / MAIN_H);
+  renderer.setScissorTest(false);
 }
 
 function onWindowResize() {
+  updateStripHeight();
   const w = canvasRef.value.clientWidth;
   const h = canvasRef.value.clientHeight;
-  const aspect = w / h;
-  camera.left   = (-FRUSTUM_SIZE * aspect) / 2;
-  camera.right  = ( FRUSTUM_SIZE * aspect) / 2;
-  camera.top    =   FRUSTUM_SIZE / 2;
-  camera.bottom =  -FRUSTUM_SIZE / 2;
-  camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  const mainH = PARAMS.showPreviews
+    ? h - Math.round(Math.min(220, w / PREVIEW_SCHEMES.length))
+    : h;
+  setCameraAspect(w / mainH);
   loadedObject?.traverse((child) => {
-    if (child.isLineSegments2) child.material.resolution?.set(w, h);
+    if (!child.isLineSegments2) return;
+    child.material.resolution?.set(w, mainH);
+    if (child.renderOrder === 0) child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
+    if (child.renderOrder === 1) child.material.linewidth = scaledLinewidth(PARAMS.foundationWeight);
   });
 }
 </script>
@@ -818,15 +995,61 @@ function onWindowResize() {
   position: relative;
   width: 100%;
   height: 100vh;
+  background: #111111;
+  padding: 10px;
+  box-sizing: border-box;
+  --strip-h: 0px;
 }
 .canvas-container {
   width: 100%;
   height: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+}
+/* Gap element that visually splits the canvas into two panels when
+   the preview strip is visible. Same color as the page background.
+   ::before/::after add concave corner pieces at the 4 inner corners
+   so both panels appear fully rounded. */
+.panel-divider {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(10px + var(--strip-h));
+  height: 8px;
+  background: #111111;
+  z-index: 1;
+  pointer-events: none;
+}
+.panel-divider::before,
+.panel-divider::after {
+  content: '';
+  position: absolute;
+  top: -12px;
+  width: 12px;
+  height: calc(100% + 24px);
+  pointer-events: none;
+}
+/* Left side: rounds bottom-left of main panel + top-left of preview panel.
+   No background-color — the transparent gradient areas must reveal the canvas,
+   not a fill color. The gap middle is transparent so panel-divider's own
+   background shows through. */
+.panel-divider::before {
+  left: 0;
+  background:
+    radial-gradient(circle at 100% 0%,   transparent 12px, #111111 12px) 0 0    / 12px 12px no-repeat,
+    radial-gradient(circle at 100% 100%, transparent 12px, #111111 12px) 0 100% / 12px 12px no-repeat;
+}
+/* Right side: rounds bottom-right of main panel + top-right of preview panel */
+.panel-divider::after {
+  right: 0;
+  background:
+    radial-gradient(circle at 0% 0%,   transparent 12px, #111111 12px) 100% 0    / 12px 12px no-repeat,
+    radial-gradient(circle at 0% 100%, transparent 12px, #111111 12px) 100% 100% / 12px 12px no-repeat;
 }
 .info-bar {
   position: absolute;
-  bottom: 16px;
-  left: 16px;
+  bottom: 20px;
+  left: 20px;
   padding: 6px 10px;
   background: rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(4px);
