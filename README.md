@@ -26,38 +26,58 @@ npm run dev
 | Background | Canvas background color |
 | Edge Color | Wireframe edge color |
 | Edge Weight | Line thickness in screen pixels (1–100) |
-| Rot X / Y / Z | Rotation in degrees |
-| Scale | Uniform scale |
-| Pivot | Offset the rotation pivot point for animation |
-| Reset View | Returns to default rotation and scale |
+| Edge Angle | Crease angle threshold for edge detection (1–90°) |
+| Stem Height | Height of the "6" upstroke |
+| Rot X / Y / Z | Static pose rotation in degrees |
+| Width / Height / Depth | Extrusion dimensions — rebuilds geometry (not a scale transform) |
+| Spin 360° | Triggers a spring-physics 360° Y-axis entrance spin |
+| Pivot | Offset the rotation pivot point |
+| Reset View | Returns to default pose (Y=45, Z=−45) |
 | Screenshot | Downloads current frame as PNG |
+| Export SVG | Projects edges through camera and downloads as SVG |
 | Download Preset | Exports all PARAMS values as JSON |
 
 ### Mouse
 
 | Action | Result |
 |---|---|
-| Left drag | Rotate |
+| Left drag | Rotate (world-space, always maps to screen axes) |
 | Right drag / Shift + drag | Pan |
-| Scroll wheel | Zoom |
+
+### Keyboard
+
+| Shortcut | Action |
+|---|---|
+| Cmd+Z | Undo |
+| Cmd+Shift+Z | Redo |
 
 ### Loading files
 
-Click **Load File (OBJ / SVG)** to replace the default logo geometry with your own:
+Click **Load File (OBJ / SVG)** to replace the default logo geometry:
 - `.obj` — loaded as-is, centered and fitted, edges extracted
 - `.svg` — extruded into 3D; an **Extrusion** depth slider appears
 
 ## Default geometry
 
 The 6th Street logo is coded directly (`loadDefaultLogo`) as:
-- `BoxGeometry(2, 2, 2)` — the cube body
-- `PlaneGeometry(2, 2)` rotated to the YZ plane at x=-1, y=2 — the upstroke
+- `BoxGeometry(W*2, H*2, D*2)` — the cube body (W/H/D from Extrusion sliders, default 1/1/0.95)
+- `PlaneGeometry(D*2, stemHeight)` rotated to the YZ plane at x=−W — the upstroke
 
-This matches the `public/sixth-logo.obj` shape exactly. No file load required on startup.
+Default pose: Y=45°, Z=−45°, edge weight 9.5, edge angle 70°.
+
+## Animation
+
+The Spin 360° animation uses a spring physics integrator (not fixed-duration easing):
+
+```js
+const SPRING = { stiffness: 50, damping: 12, mass: 1 };
+```
+
+Each rAF frame steps the spring in normalized progress space (0→1), mapped to Y rotation. This gives organic acceleration and a natural weighted decelerate-and-settle feel — appropriate for a logo entrance.
 
 ## Grid guides
 
-A fixed XY-plane grid sits at the scene root (z = -0.5). It does **not** move with the model — it marks world (0, 0) as a stable reference while you pan and rotate the logo.
+A fixed XY-plane grid sits at the scene root (z = −0.5). It does **not** move with the model — it marks world (0, 0) as a stable reference while you rotate and pan.
 
 ## Build
 
