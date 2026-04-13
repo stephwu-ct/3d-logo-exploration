@@ -4,6 +4,18 @@
 
 A standalone Three.js wireframe viewer for the 6th Street logo. Used by Matty for motion and animation exploration — not a production app. The goal is real-time visual experimentation: edge weight, color, rotation, pivot point, extrusion dimensions.
 
+## Remotes
+
+`origin` is configured with two push URLs — every `git push` goes to both repos simultaneously.
+
+| Remote | URL | Purpose |
+|--------|-----|---------|
+| `origin` (fetch) | https://github.com/stephwu-ct/3d-logo-exploration | Steph Wu's repo — shared collaboration |
+| `origin` (push) | https://github.com/stephwu-ct/3d-logo-exploration | ↑ pushed on every commit |
+| `origin` (push) | https://github.com/mattywoodward-ct/3d-logo-exploration | Matty's private repo → Vercel |
+
+Just use `git push` as normal — both repos stay in sync automatically.
+
 ## Stack
 
 - Vue 3 `<script setup>` — single component app (`ThreeViewer.vue`)
@@ -124,7 +136,7 @@ const PARAMS = {
   shapeW: 1, shapeH: 1, shapeD: 0.75,
   panX: 0, panY: 0,
   pivotX: 0, pivotY: 0, pivotZ: 0,
-  showPreviews:      false,
+  showPreviews:      true,
   showGrid:          false,      // off by default
 };
 ```
