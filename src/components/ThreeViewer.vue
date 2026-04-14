@@ -153,6 +153,7 @@ const PARAMS = {
   rotX: 0, rotY: 45, rotZ: -45,
   // shape dimensions — rebuild geometry on change (W=width, H=height, D=depth)
   shapeW: 1, shapeH: 1, shapeD: 0.75,
+  cornerRadius: 0,
   // pan (animGroup position)
   panX: 0, panY: 0,
   // pivot offset (loadedObject)
@@ -163,14 +164,15 @@ const PARAMS = {
   hideBodyCrossbar: false,
   showFill:         true,
   showFaceNumbers:  false,
+  zoom: 1,
 };
 
 const SNAPSHOT_KEYS = [
   'bgColor','fillBgColor','fillColor','showArtwork','edgeWeight','edgeAngle',
   'showFoundation','foundationColor','foundationWeight','foundationOpacity',
   'extrusionDepth','stemHeight',
-  'rotX','rotY','rotZ','shapeW','shapeH','shapeD','panX','panY',
-  'pivotX','pivotY','pivotZ','showGrid','hideBodyCrossbar','showFill',
+  'rotX','rotY','rotZ','shapeW','shapeH','shapeD','cornerRadius','panX','panY',
+  'pivotX','pivotY','pivotZ','showGrid','hideBodyCrossbar','showFill','zoom',
 ];
 
 let cachedSVGPaths    = null;
@@ -448,6 +450,10 @@ function initPane() {
     .on('change', () => { rebuildShape(); scheduleSnapshot(); });
   shapeDBinding = xfFolder.addBinding(PARAMS, 'shapeD', { label: 'Depth',  min: 0.1, max: 4, step: 0.05 })
     .on('change', () => { rebuildShape(); scheduleSnapshot(); });
+  xfFolder.addBinding(PARAMS, 'cornerRadius', { label: 'Corner Radius', min: 0, max: 0.9, step: 0.01 })
+    .on('change', () => { rebuildShape(); scheduleSnapshot(); });
+  xfFolder.addBinding(PARAMS, 'zoom', { label: 'Scale', min: 0.1, max: 3, step: 0.05 })
+    .on('change', () => { scheduleSnapshot(); });
 
   // Animations — triggered explorations, each fires a canned animation on animGroup
   const animFolder = pane.addFolder({ title: 'Animations', expanded: true });
@@ -704,6 +710,8 @@ function applyEdgeMode(group) {
 //
 function buildFaceLayers(group) {
   const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD, sH = PARAMS.stemHeight;
+  // Corner radius — clamped so arcs never exceed 90% of either half-dimension
+  const r = Math.max(0, Math.min(PARAMS.cornerRadius ?? 0, W * 0.9, H * 0.9));
   faceLayerGroups = [];
 
   const fillMat = () => new THREE.MeshBasicMaterial({
@@ -734,67 +742,98 @@ function buildFaceLayers(group) {
     return l;
   };
 
+  // Arc helper: quarter-circle line segments in the XY plane at a fixed Z.
+  // cx,cy = center; z = depth; startA/endA = angle range; nSegs = subdivision.
+  const arcSegs = (cx, cy, z, startA, endA, nSegs = 12) => {
+    const pts = [];
+    for (let i = 0; i < nSegs; i++) {
+      const a0 = startA + (endA - startA) * (i / nSegs);
+      const a1 = startA + (endA - startA) * ((i + 1) / nSegs);
+      pts.push(
+        cx + r * Math.cos(a0), cy + r * Math.sin(a0), z,
+        cx + r * Math.cos(a1), cy + r * Math.sin(a1), z,
+      );
+    }
+    return pts;
+  };
+
   // Right face (+X)
+  // When r > 0: top-right corner (W,H) is rounded — shorten the verticals and
+  // remove the top bar (the corner edge W,H,-D → W,H,D is replaced by arcs).
   const rightFill   = addFill(new THREE.PlaneGeometry(D * 2, H * 2), W, 0, 0, 0, -Math.PI / 2, 0);
   const rightStroke = addStroke([
-    W, H,-D,  W, H, D,
-    W, H, D,  W,-H, D,
-    W,-H, D,  W,-H,-D,
-    W,-H,-D,  W, H,-D,
+    ...(r === 0 ? [W, H,-D,  W, H, D] : []),  // top bar — removed when rounded
+    W, H - r, D,   W,   -H, D,                 // front vertical (top trimmed)
+    W,    -H, D,   W,   -H,-D,                 // bottom
+    W,    -H,-D,   W, H - r,-D,                // back vertical (top trimmed)
   ]);
   faceLayerGroups.push({ fill: rightFill, stroke: rightStroke, localNormal: new THREE.Vector3(1, 0, 0) });
 
   // Top face (+Y)
-  // Omit the left edge (-W,H,-D)→(-W,H,D) — it sits exactly on the combined
-  // left+stem face plane and its round endpoints create the same crossbar seam
-  // we suppress everywhere else. The left+stem vertical edges pass through
-  // those points and implicitly mark the boundary.
+  // Omit the left edge (-W,H,-D)→(-W,H,D) — it sits on the combined left+stem
+  // face plane. When r > 0: right edge removed (replaced by arcs), back/front
+  // edges trimmed to W-r.
   const topFill   = addFill(new THREE.PlaneGeometry(W * 2, D * 2), 0, H, 0, Math.PI / 2, 0, 0);
   const topStroke = addStroke([
-     W, H,-D, -W, H,-D,  // back edge
-    -W, H, D,  W, H, D,  // front edge
-     W, H, D,  W, H,-D,  // right edge
+    W - r, H,-D, -W, H,-D,  // back edge (right end trimmed)
+    -W,    H, D, W - r, H, D,  // front edge (right end trimmed)
+    ...(r === 0 ? [W, H, D,  W, H,-D] : []),  // right edge — removed when rounded
   ]);
   faceLayerGroups.push({ fill: topFill, stroke: topStroke, localNormal: new THREE.Vector3(0, 1, 0) });
 
   // Bottom face (-Y)
-  // Omit the left edge (-W,-H,-D)→(-W,-H,D) for the same reason as the top face:
-  // the left+stem vertical edges already pass through those points.
+  // Omit the left edge (-W,-H,-D)→(-W,-H,D) — left+stem verticals mark that boundary.
+  // When r > 0: back/front edges trimmed to -W+r (left end).
   const botFill   = addFill(new THREE.PlaneGeometry(W * 2, D * 2), 0, -H, 0, -Math.PI / 2, 0, 0);
   const botStroke = addStroke([
-     W,-H,-D, -W,-H,-D,  // back edge
-    -W,-H, D,  W,-H, D,  // front edge
-     W,-H, D,  W,-H,-D,  // right edge
+     W,-H,-D, -W + r,-H,-D,  // back edge (left end trimmed)
+    -W + r,-H, D,  W,-H, D,  // front edge (left end trimmed)
+     W,-H, D,  W,-H,-D,      // right edge
   ]);
   faceLayerGroups.push({ fill: botFill, stroke: botStroke, localNormal: new THREE.Vector3(0, -1, 0) });
 
   // Combined left face + stem (-X): one rectangle spanning y=-H to y=H+sH
-  // heightSegments:2 keeps a vertex row at y=0 (local) = y=H (group), preventing
-  // a triangle diagonal from crossing the box/stem junction.
+  // heightSegments:2 keeps a vertex row at y=H preventing triangle diagonals.
+  // When r > 0: bottom corner (-W,-H) is rounded — shorten the verticals by r,
+  // shift the bottom bar up to -H+r, and drop the bottom corner stubs.
   const leftFill   = addFill(
     new THREE.PlaneGeometry(D * 2, 2 * H + sH, 1, 2),
-    -W, sH / 2, 0,  // center Y of combined range [-H, H+sH]
+    -W, sH / 2, 0,
     0, -Math.PI / 2, 0
   );
-  // Tiny stubs (epsilon = 0.02) to force round caps at the four corner junctions.
-  // LineSegments2 only draws round caps at segment ENDPOINTS — the left+stem
-  // verticals pass through (-W, ±H, ±D) as interior points, so no cap is drawn
-  // there. These stubs end at each junction, placing an order-4 orange cap that
-  // covers the teal notch left by the order-3 fill at those corners.
   const eps = 0.001;
   const leftStroke = addStroke([
-    // Outer boundary — no internal crossbar at y=H
-    -W,     H + sH,-D,  -W,    -H,-D,  // full back vertical
-    -W,    -H,-D,  -W,    -H, D,        // bottom
-    -W,    -H, D,  -W, H + sH, D,       // full front vertical
-    -W, H + sH, D, -W, H + sH,-D,       // stem top
-    // Corner stubs — only ε long, invisible as lines but cap covers the notch
-    -W + eps, H,-D,  -W, H,-D,   // top-back-left junction
-    -W + eps, H, D,  -W, H, D,   // top-front-left junction
-    -W + eps,-H,-D,  -W,-H,-D,   // bottom-back-left junction
-    -W + eps,-H, D,  -W,-H, D,   // bottom-front-left junction
+    // Outer boundary
+    -W,  H + sH,-D,  -W, -H + r,-D,  // back vertical (bottom trimmed)
+    -W, -H + r,-D,   -W, -H + r, D,  // bottom bar (shifted up by r when r > 0)
+    -W, -H + r, D,   -W,  H + sH, D, // front vertical (bottom trimmed)
+    -W,  H + sH, D,  -W,  H + sH,-D, // stem top
+    // Corner stubs at body-stem junction (y=H): always needed — interior seam cap
+    -W + eps, H,-D,  -W, H,-D,
+    -W + eps, H, D,  -W, H, D,
+    // Bottom corner stubs: only when r===0 (when rounded, the sharp corner is gone)
+    ...(r === 0 ? [-W + eps,-H,-D,  -W,-H,-D,  -W + eps,-H, D,  -W,-H, D] : []),
   ]);
   faceLayerGroups.push({ fill: leftFill, stroke: leftStroke, localNormal: new THREE.Vector3(-1, 0, 0) });
+
+  // Corner arc strokes — added when r > 0.
+  // Each corner gets arcs at z = -D (back) and z = +D (front).
+  // Bisector normals (diagonal) let updateFaceLayerOrders handle depth sorting.
+  if (r > 0) {
+    // Top-right corner: center (W-r, H-r), arc from 0 → π/2
+    const trArc = addStroke([
+      ...arcSegs(W - r, H - r, -D, 0, Math.PI / 2),
+      ...arcSegs(W - r, H - r,  D, 0, Math.PI / 2),
+    ]);
+    faceLayerGroups.push({ fill: null, stroke: trArc, localNormal: new THREE.Vector3(0.707, 0.707, 0) });
+
+    // Bottom-left corner: center (-W+r, -H+r), arc from π → 3π/2
+    const blArc = addStroke([
+      ...arcSegs(-W + r, -H + r, -D, Math.PI, 3 * Math.PI / 2),
+      ...arcSegs(-W + r, -H + r,  D, Math.PI, 3 * Math.PI / 2),
+    ]);
+    faceLayerGroups.push({ fill: null, stroke: blArc, localNormal: new THREE.Vector3(-0.707, -0.707, 0) });
+  }
 
   // Front (+Z) and back (-Z) faces are intentionally left open (no fill) —
   // the 3D depth and inner structure remain visible through those faces.
@@ -824,7 +863,7 @@ function updateFaceLayerOrders() {
   let leftStemFront = false;
   faceLayerGroups.forEach(({ fill, stroke, localNormal }) => {
     const front = tmp.copy(localNormal).applyQuaternion(worldQ).z > 0;
-    fill.renderOrder = front ? 3 : 1;
+    if (fill) fill.renderOrder = front ? 3 : 1;
     if (stroke) stroke.renderOrder = front ? 4 : 2;
     // Track left+stem facing for crossbar visibility below
     if (localNormal.x < 0 && localNormal.y === 0 && localNormal.z === 0) leftStemFront = front;
@@ -911,10 +950,11 @@ function collectMaterials() {
 }
 
 function setCameraAspect(aspect) {
-  camera.left   = (-FRUSTUM_SIZE * aspect) / 2;
-  camera.right  = ( FRUSTUM_SIZE * aspect) / 2;
-  camera.top    =  FRUSTUM_SIZE / 2;
-  camera.bottom = -FRUSTUM_SIZE / 2;
+  const fs = FRUSTUM_SIZE / PARAMS.zoom;
+  camera.left   = (-fs * aspect) / 2;
+  camera.right  = ( fs * aspect) / 2;
+  camera.top    =  fs / 2;
+  camera.bottom = -fs / 2;
   camera.updateProjectionMatrix();
 }
 
