@@ -886,41 +886,40 @@ function updateFaceLayerOrders() {
 }
 
 function updateFill() {
-  // Knockout: fill planes use the foreground (stroke) color so faces read as
-  // solid shapes; strokes are drawn in the background color and act as thin
-  // separator lines between faces. Normal mode is the inverse.
-  const planeColor = PARAMS.knockout ? PARAMS.fillColor : PARAMS.fillBgColor;
+  // Fills are visible in normal mode (showFill ON) or whenever knockout is
+  // active — knockout forces the fill planes to show as solid colored shapes
+  // even if the user toggled showFill off.
+  const fillsActive = PARAMS.showFill || PARAMS.knockout;
+  const planeColor  = PARAMS.knockout ? PARAMS.fillColor : PARAMS.fillBgColor;
   loadedObject?.traverse((child) => {
     if (!child.isMesh || child.isLineSegments2) return;
     if (!child.userData.isFillColor) return;
-    child.visible = PARAMS.showFill;
+    child.visible = fillsActive;
     const mats = Array.isArray(child.material) ? child.material : [child.material];
     mats.forEach(m => { if (m?.color && m.visible !== false) m.color.setStyle(planeColor); });
   });
-  // Swap which stroke set is active: face-layer strokes when fill is ON,
-  // regular strokes (meshToLine) when fill is OFF.
   updateArtwork();
 }
 
 function updateArtwork() {
-  const useLayers = PARAMS.showFill && faceLayerGroups.length > 0;
-  // Knockout inverts fill/stroke roles for face-layer strokes only: they become
-  // the background color, acting as thin separating lines between solid-colored
-  // fill planes. Regular strokes (fill OFF, shows all crossbars) always use
-  // fillColor so the full wireframe stays visible regardless of knockout.
+  // Face-layer fills (and their strokes) are active when fill is ON or knockout
+  // is ON — knockout keeps fills visible even when showFill is toggled off.
+  const fillsActive    = PARAMS.showFill || PARAMS.knockout;
   const faceLayerColor = PARAMS.knockout ? PARAMS.bgColor : PARAMS.fillColor;
   loadedObject?.traverse((child) => {
     if (!child.isLineSegments2) return;
     if (child.userData.isFaceLayerStroke) {
-      // Face-layer strokes: active only when fill is ON
+      // Face-layer strokes: visible whenever fills are active
       child.material.color.setStyle(faceLayerColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
-      child.visible = useLayers && PARAMS.showArtwork;
+      child.visible = fillsActive && PARAMS.showArtwork;
     } else if (child.renderOrder === 0) {
-      // Regular artwork strokes: active only when fill is OFF — always fillColor
+      // Regular strokes (all edges incl. crossbars): visible when fill is OFF.
+      // Overlays the knockout view when knockout=ON + showFill=OFF, letting
+      // the underlying diagonal structure show through.
       child.material.color.setStyle(PARAMS.fillColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
-      child.visible = !useLayers && PARAMS.showArtwork;
+      child.visible = !PARAMS.showFill && PARAMS.showArtwork;
     }
   });
 }
@@ -1486,7 +1485,8 @@ function animate() {
   foundationMaterials.forEach(m => { if (m) m.linewidth = scaledLinewidth(PARAMS.foundationWeight); });
   restoreMainColors();
   const mainFillBg = new THREE.Color(PARAMS.knockout ? PARAMS.fillColor : PARAMS.fillBgColor);
-  fillMeshMaterials.forEach(m => { if (m) m.color.copy(mainFillBg); });
+  const mainFillVisible = PARAMS.showFill || PARAMS.knockout;
+  fillMeshMaterials.forEach(m => { if (m) { m.color.copy(mainFillBg); m.visible = mainFillVisible; } });
   scene.background.setStyle(PARAMS.bgColor);
   setCameraAspect(cw / MAIN_H);
   renderer.setScissorTest(false);
