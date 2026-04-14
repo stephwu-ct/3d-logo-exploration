@@ -80,6 +80,7 @@ const PREVIEW_SCHEMES = [
 // any applyEdgeMode / rebuild. Avoids per-frame scene traversal.
 let artworkMaterials    = [];
 let foundationMaterials = [];
+let fillMeshMaterials   = [];
 
 // ─── Interaction ──────────────────────────────────────────────
 let isDragging = false;
@@ -109,7 +110,7 @@ const PARAMS = {
   foundationWeight:  1,
   foundationOpacity: 1,
   extrusionDepth: 5,
-  stemHeight:     2,
+  stemHeight:     1,
   // pose (poseGroup)
   rotX: 0, rotY: 45, rotZ: -45,
   // shape dimensions — rebuild geometry on change (W=width, H=height, D=depth)
@@ -122,6 +123,8 @@ const PARAMS = {
   showPreviews:     true,
   showGrid:         false,
   hideBodyCrossbar: false,
+  showFill:         false,
+  showFaceNumbers:  false,
 };
 
 const SNAPSHOT_KEYS = [
@@ -129,13 +132,14 @@ const SNAPSHOT_KEYS = [
   'showFoundation','foundationColor','foundationWeight','foundationOpacity',
   'extrusionDepth','stemHeight',
   'rotX','rotY','rotZ','shapeW','shapeH','shapeD','panX','panY',
-  'pivotX','pivotY','pivotZ','showGrid','hideBodyCrossbar',
+  'pivotX','pivotY','pivotZ','showGrid','hideBodyCrossbar','showFill',
 ];
 
 let cachedSVGPaths    = null;
 let isSVGLoaded       = false;
 const meshToLine       = new WeakMap(); // mesh → artwork LineSegments2
 const meshToFoundation = new WeakMap(); // mesh → foundation LineSegments2
+const meshToFillColor  = new WeakMap(); // mesh → color-pass fill sibling
 
 // ─── History ──────────────────────────────────────────────────
 
@@ -184,6 +188,7 @@ function applySnapshot(snap) {
   SNAPSHOT_KEYS.forEach(k => { PARAMS[k] = snap[k]; });
   pane.refresh();
   scene.background = new THREE.Color(PARAMS.bgColor);
+  updateFill();
   updateArtwork();
   updateFoundation();
   syncPose();
@@ -296,13 +301,17 @@ function initPane() {
     .on('change', () => { showPreviewsReactive.value = PARAMS.showPreviews; updateStripHeight(); onWindowResize(); });
   pane.addBinding(PARAMS, 'showGrid', { label: 'Show Grid' })
     .on('change', () => { if (gridGroup) gridGroup.visible = PARAMS.showGrid; scheduleSnapshot(); });
+  pane.addBinding(PARAMS, 'showFaceNumbers', { label: 'Face Numbers' })
+    .on('change', () => { updateFaceNumbers(); });
 
   // Material
   const matFolder = pane.addFolder({ title: 'Material', expanded: true });
 
   matFolder.addBinding(PARAMS, 'bgColor', { label: 'Background', view: 'color' })
-    .on('change', ({ value }) => { scene.background = new THREE.Color(value); scheduleSnapshot(); });
-  matFolder.addBinding(PARAMS, 'showArtwork', { label: 'Show' })
+    .on('change', ({ value }) => { scene.background = new THREE.Color(value); updateFill(); scheduleSnapshot(); });
+  matFolder.addBinding(PARAMS, 'showFill', { label: 'Fill' })
+    .on('change', () => { updateFill(); scheduleSnapshot(); });
+  matFolder.addBinding(PARAMS, 'showArtwork', { label: 'Stroke' })
     .on('change', () => { updateArtwork(); scheduleSnapshot(); });
   matFolder.addBinding(PARAMS, 'fillColor', { label: 'Edge Color', view: 'color' })
     .on('change', () => { updateEdgeColor(); scheduleSnapshot(); });
@@ -444,18 +453,107 @@ function getBodyArtworkPositions(mesh) {
   return new Float32Array(filtered);
 }
 
+// ─── Face number labels ───────────────────────────────────────
+// Numbered sprites placed at each face center, slightly outside the surface.
+// Sprites always face the camera (THREE.Sprite) and ignore depth so they're
+// always readable. Called at the end of applyEdgeMode.
+
+function createTextSprite(label) {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${Math.round(size * 0.52)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(label), size / 2, size / 2 + 4);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.28, 0.28, 1);
+  sprite.userData.isFaceLabel = true;
+  sprite.visible = PARAMS.showFaceNumbers;
+  return sprite;
+}
+
+function buildFaceLabels(group) {
+  let n = 1;
+  group.traverse((child) => {
+    if (!child.isMesh || child.isLineSegments2 || child.userData.isFillColor || child.userData.isCombinedFill) return;
+    const geo = child.geometry;
+    const pos = geo.attributes.position;
+    const nrm = geo.attributes.normal;
+    if (!pos || !nrm) return;
+
+    // Fall back to a single group if geometry has none (e.g. PlaneGeometry)
+    const groups = geo.groups.length > 0
+      ? geo.groups
+      : [{ start: 0, count: geo.index ? geo.index.count : pos.count }];
+
+    groups.forEach((grp) => {
+      const center = new THREE.Vector3();
+      const normal = new THREE.Vector3();
+      let count = 0;
+      const idx = geo.index?.array;
+      for (let i = grp.start; i < grp.start + grp.count; i++) {
+        const vi = idx ? idx[i] : i;
+        center.x += pos.getX(vi); center.y += pos.getY(vi); center.z += pos.getZ(vi);
+        normal.x += nrm.getX(vi); normal.y += nrm.getY(vi); normal.z += nrm.getZ(vi);
+        count++;
+      }
+      center.divideScalar(count);
+      normal.divideScalar(count).normalize();
+
+      const sprite = createTextSprite(n++);
+      // Position in mesh local space: face center + small offset along face normal
+      sprite.position.copy(center).addScaledVector(normal, 0.15);
+      child.add(sprite);
+    });
+  });
+}
+
+function updateFaceNumbers() {
+  loadedObject?.traverse((child) => {
+    if (child.userData.isFaceLabel) child.visible = PARAMS.showFaceNumbers;
+  });
+}
+
 function applyEdgeMode(group) {
   const meshes = [];
   group.traverse((child) => {
     if (child.isMesh && !child.isLineSegments2) meshes.push(child);
   });
   meshes.forEach((mesh) => {
-    mesh.visible = false;
+    // Fill: single pass, renderOrder -1.
+    // polygonOffset pushes fill depth slightly away from camera so strokes
+    // (renderOrder 0, depthTest true) always pass the depth test and render on top.
+    // FrontSide on closed meshes (box body) prevents inner polygons from occluding
+    // strokes. DoubleSide on flat planes (stem) ensures visibility from both sides.
+    if (mesh.userData.hideFill) {
+      mesh.material = new THREE.MeshBasicMaterial({ visible: false });
+    } else {
+      const side = mesh.userData.isStem ? THREE.DoubleSide : THREE.FrontSide;
+      mesh.material = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(PARAMS.bgColor), side,
+        polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 8,
+      });
+      mesh.renderOrder = -1;
+      mesh.visible = PARAMS.showFill;
+      mesh.userData.isFillColor = true;
+    }
 
     const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, PARAMS.edgeAngle);
     const allPositions = edgesGeo.attributes.position.array;
+    // Also suppress the body-stem junction edge (y≈H at x≈-W) whenever the
+    // combined stem fill is active — it's an interior seam, not a boundary.
+    const hasCombined = mesh.parent?.userData.hasCombinedStemFill;
     const artPositions = mesh.userData.isStem  ? getStemArtworkPositions(mesh) :
-                         mesh.userData.isBody && PARAMS.hideBodyCrossbar ? getBodyArtworkPositions(mesh) :
+                         mesh.userData.isBody && (PARAMS.hideBodyCrossbar || hasCombined) ? getBodyArtworkPositions(mesh) :
                          allPositions;
 
     // Artwork layer — thick stroke, rendered first (renderOrder 0)
@@ -483,7 +581,78 @@ function applyEdgeMode(group) {
     mesh.parent.add(found);
     meshToFoundation.set(mesh, found);
   });
+  if (group.userData.hasBodyFills)       buildBodyFaceFill(group);
+  if (group.userData.hasCombinedStemFill) buildCombinedStemFill(group);
   collectMaterials();
+  buildFaceLabels(group);
+}
+
+// Builds individual PlaneGeometry fill meshes for the three visible box faces:
+// right (+X), top (+Y), bottom (-Y). Using separate planes instead of a multi-material
+// BoxGeometry avoids the triangle-seam artifact that appears at certain viewing angles.
+function buildBodyFaceFill(group) {
+  const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD;
+  const fillMat = () => new THREE.MeshBasicMaterial({
+    color: new THREE.Color(PARAMS.bgColor), side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 8,
+  });
+  const faces = [
+    // Right face (+X): plane spans depth × height, normal along +X
+    { geo: new THREE.PlaneGeometry(D * 2, H * 2), pos: new THREE.Vector3(W, 0, 0),  rot: new THREE.Euler(0, -Math.PI / 2, 0) },
+    // Top face (+Y): plane spans width × depth, normal along +Y
+    { geo: new THREE.PlaneGeometry(W * 2, D * 2), pos: new THREE.Vector3(0, H, 0),  rot: new THREE.Euler(Math.PI / 2, 0, 0) },
+    // Bottom face (-Y): plane spans width × depth, normal along -Y
+    { geo: new THREE.PlaneGeometry(W * 2, D * 2), pos: new THREE.Vector3(0, -H, 0), rot: new THREE.Euler(-Math.PI / 2, 0, 0) },
+  ];
+  faces.forEach(({ geo, pos, rot }) => {
+    const mesh = new THREE.Mesh(geo, fillMat());
+    mesh.position.copy(pos);
+    mesh.rotation.copy(rot);
+    mesh.renderOrder = -1;
+    mesh.visible = PARAMS.showFill;
+    mesh.userData.isFillColor = true;
+    mesh.userData.isBodyFaceFill = true;
+    group.add(mesh);
+  });
+}
+
+// Builds a single fill plane that covers both the left (-X) box face and the stem,
+// so they read as one continuous surface instead of two separate fills.
+// In loadedObject-local space both sit on the x = -W plane:
+//   left face  y: -H → +H
+//   stem       y: +H → H + stemHeight
+// Combined: y from -H to H+stemHeight, z from -D to D.
+function buildCombinedStemFill(group) {
+  const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD, sH = PARAMS.stemHeight;
+  const totalH = 2 * H + sH;
+  // heightSegments: 2 puts a vertex row exactly at local y=0 → group y=H,
+  // so the triangle diagonal no longer crosses the junction and depth
+  // interpolation is exact there. Slightly higher polygonOffset than box faces
+  // (4/8) so it consistently wins the depth comparison at the shared edge.
+  const geo  = new THREE.PlaneGeometry(D * 2, totalH, 1, 2);
+  const posY = sH / 2; // center of combined range [-H, H+sH]
+
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: new THREE.Color(PARAMS.bgColor), side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: 6, polygonOffsetUnits: 12,
+  }));
+  mesh.rotation.y = -Math.PI / 2;
+  mesh.position.set(-W, posY, 0);
+  mesh.renderOrder = -1;
+  mesh.visible = PARAMS.showFill;
+  mesh.userData.isCombinedFill = true;
+  mesh.userData.isFillColor    = true;
+  group.add(mesh);
+}
+
+function updateFill() {
+  loadedObject?.traverse((child) => {
+    if (!child.isMesh || child.isLineSegments2) return;
+    if (!child.userData.isFillColor) return;
+    child.visible = PARAMS.showFill;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach(m => { if (m?.color && m.visible !== false) m.color.setStyle(PARAMS.bgColor); });
+  });
 }
 
 function updateArtwork() {
@@ -518,9 +687,14 @@ function updateFoundation() {
 function collectMaterials() {
   artworkMaterials    = [];
   foundationMaterials = [];
+  fillMeshMaterials   = [];
   loadedObject?.traverse((child) => {
-    if (!child.isLineSegments2) return;
-    (child.renderOrder === 0 ? artworkMaterials : foundationMaterials).push(child.material);
+    if (child.isMesh && !child.isLineSegments2 && child.userData.isFillColor) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach(m => { if (m?.color && m.visible !== false) fillMeshMaterials.push(m); });
+    } else if (child.isLineSegments2) {
+      (child.renderOrder === 0 ? artworkMaterials : foundationMaterials).push(child.material);
+    }
   });
 }
 
@@ -550,17 +724,28 @@ function restoreMainColors() {
 function rebuildEdges() {
   if (!loadedObject) return;
   loadedObject.traverse((child) => {
-    if (child.isMesh && !child.isLineSegments2) {
-      const line = meshToLine.get(child);
-      if (!line) return;
-      const edgesGeo   = new THREE.EdgesGeometry(child.geometry, PARAMS.edgeAngle);
-      const newPositions = child.userData.isStem  ? getStemArtworkPositions(child) :
-                           child.userData.isBody && PARAMS.hideBodyCrossbar ? getBodyArtworkPositions(child) :
-                           edgesGeo.attributes.position.array;
+    if (!child.isMesh || child.isLineSegments2) return;
+    const edgesGeo    = new THREE.EdgesGeometry(child.geometry, PARAMS.edgeAngle);
+    const hasCombined = child.parent?.userData.hasCombinedStemFill;
+    const allPositions = edgesGeo.attributes.position.array;
+    const artPositions = child.userData.isStem ? getStemArtworkPositions(child) :
+                         child.userData.isBody && (PARAMS.hideBodyCrossbar || hasCombined) ? getBodyArtworkPositions(child) :
+                         allPositions;
+
+    const line = meshToLine.get(child);
+    if (line) {
       const newGeo = new LineSegmentsGeometry();
-      newGeo.setPositions(newPositions);
+      newGeo.setPositions(artPositions);
       line.geometry.dispose();
       line.geometry = newGeo;
+    }
+
+    const found = meshToFoundation.get(child);
+    if (found) {
+      const newGeo = new LineSegmentsGeometry();
+      newGeo.setPositions(allPositions);
+      found.geometry.dispose();
+      found.geometry = newGeo;
     }
   });
 }
@@ -572,13 +757,20 @@ function buildDefaultGroup() {
   const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD;
   const body = new THREE.Mesh(new THREE.BoxGeometry(W * 2, H * 2, D * 2), dummy);
   body.userData.isBody = true;
+  // Fill is handled by individual PlaneGeometry meshes per face (buildBodyFaceFill)
+  // to avoid BoxGeometry's triangle-seam artifact. Left/front/back faces are excluded.
+  body.userData.hideFill = true;
   // Stem sits on the YZ plane at x = -W (the left face of the box).
   // Its width spans the full depth of the box (D*2) so it lines up flush.
   const stem = new THREE.Mesh(new THREE.PlaneGeometry(D * 2, PARAMS.stemHeight), dummy);
   stem.rotation.y = -Math.PI / 2;
   stem.position.set(-W, H + PARAMS.stemHeight / 2, 0);
   stem.userData.isStem = true;
+  // Stem fill is handled by the combined left+stem fill plane — skip per-mesh fill.
+  stem.userData.hideFill = true;
   const group = new THREE.Group();
+  group.userData.hasCombinedStemFill = true;
+  group.userData.hasBodyFills = true;
   group.add(body, stem);
   return group;
 }
@@ -844,8 +1036,14 @@ function downloadScreenshot() {
 
 function downloadSVG() {
   if (!loadedObject) return;
-  const w = canvasRef.value.clientWidth;
-  const h = canvasRef.value.clientHeight;
+  const cw = canvasRef.value.clientWidth;
+  const ch = canvasRef.value.clientHeight;
+  // Use main viewport dimensions only (exclude preview strip) so projection
+  // matches exactly what the camera sees — prevents vertical stretch.
+  const w = cw;
+  const h = PARAMS.showPreviews
+    ? ch - Math.round(Math.min(220, cw / PREVIEW_SCHEMES.length))
+    : ch;
   scene.updateMatrixWorld(true);
 
   const segments = [];
@@ -980,6 +1178,9 @@ function animate() {
     const savedBg = scene.background.getHex();
     scene.background.setStyle(bg);
     applySchemeColors(stroke);
+    // Fill mesh color should match each cell's bg color, not PARAMS.bgColor
+    const fillBg = new THREE.Color(bg);
+    fillMeshMaterials.forEach(m => { if (m) m.color.copy(fillBg); });
 
     renderer.render(scene, camera);
 
@@ -992,6 +1193,8 @@ function animate() {
   artworkMaterials.forEach(m    => { if (m) m.linewidth = scaledLinewidth(PARAMS.edgeWeight); });
   foundationMaterials.forEach(m => { if (m) m.linewidth = scaledLinewidth(PARAMS.foundationWeight); });
   restoreMainColors();
+  const mainFillBg = new THREE.Color(PARAMS.bgColor);
+  fillMeshMaterials.forEach(m => { if (m) m.color.copy(mainFillBg); });
   scene.background.setStyle(PARAMS.bgColor);
   setCameraAspect(cw / MAIN_H);
   renderer.setScissorTest(false);
