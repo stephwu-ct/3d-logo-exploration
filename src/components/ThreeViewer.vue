@@ -919,7 +919,7 @@ function updateArtwork() {
       // In knockout+fill=OFF: hide the top-face separator (y=H line between face 2
       // and face 7). The right/bottom/left face strokes still show depth diagonals
       // (the "1 and 3 strokes") through the orange fills. All other modes: show as normal.
-      const hideJunction = PARAMS.knockout && !PARAMS.showFill && child.userData.isTopFaceStroke;
+      const hideJunction = PARAMS.knockout && child.userData.isTopFaceStroke;
       child.material.color.setStyle(faceLayerColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
       child.visible = !hideJunction && fillsActive && PARAMS.showArtwork;
