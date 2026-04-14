@@ -1,9 +1,27 @@
 <template>
   <div ref="containerRef" class="viewer-container">
-    <div ref="canvasRef" class="canvas-container"></div>
-    <div v-if="showPreviewsReactive" class="panel-divider"></div>
+    <div class="viewer-left">
+      <div ref="canvasRef" class="canvas-container"></div>
+      <div v-if="showPreviewsReactive" class="panel-divider"></div>
+      <div v-if="info" class="info-bar">{{ info }}</div>
+    </div>
+    <div class="viewer-right">
+      <div class="palette-panel">
+        <div class="palette-label">Palette</div>
+        <div class="palette-swatches">
+          <button
+            v-for="swatch in PALETTE"
+            :key="swatch.bg"
+            class="palette-swatch"
+            :style="{ background: swatch.bg }"
+            :title="swatch.bg"
+            @click="applyPalette(swatch)"
+          />
+        </div>
+      </div>
+      <div ref="paneContainerRef" class="pane-container"></div>
+    </div>
     <input ref="fileInputRef" type="file" accept=".obj,.svg" @change="handleFileUpload" style="display:none" />
-    <div v-if="info" class="info-bar">{{ info }}</div>
   </div>
 </template>
 
@@ -24,9 +42,30 @@ import extrudeFromFlat from '../animations/extrudeFromFlat.js';
 import drawIn          from '../animations/drawIn.js';
 const ANIMATIONS = [spinForward, spinReverse, axisFlip, scaleEntrance, extrudeFromFlat, drawIn];
 
+const PALETTE = [
+  { bg: '#131313', stroke: '#F6F5F4', fillBg: '#131313' },
+  { bg: '#0D2929', stroke: '#F65128', fillBg: '#0D2929' },
+  { bg: '#366F75', stroke: '#F6F5F4', fillBg: '#366F75' },
+  { bg: '#C9E7F0', stroke: '#0D2929', fillBg: '#C9E7F0' },
+  { bg: '#F65128', stroke: '#0D2929', fillBg: '#F65128' },
+  { bg: '#F6F5F4', stroke: '#131313', fillBg: '#F6F5F4' },
+];
+
+function applyPalette({ bg, stroke, fillBg }) {
+  PARAMS.bgColor   = bg;
+  PARAMS.fillColor = stroke;
+  PARAMS.fillBgColor = fillBg;
+  scene.background = new THREE.Color(bg);
+  updateEdgeColor();
+  updateFill();
+  pane.refresh();
+  scheduleSnapshot();
+}
+
 const canvasRef            = ref(null);
 const fileInputRef         = ref(null);
 const containerRef         = ref(null);
+const paneContainerRef     = ref(null);
 const info                 = ref('');
 const showPreviewsReactive = ref(true);
 
@@ -98,6 +137,7 @@ let foundationWeightBinding, foundationOpacityBinding;
 // (animation state is transient — not part of undo history).
 const PARAMS = {
   bgColor:        '#0D2929',
+  fillBgColor:    '#0D2929',
   fillColor:      '#F65128',
   showArtwork:    true,
   edgeWeight:     9.5,
@@ -126,7 +166,7 @@ const PARAMS = {
 };
 
 const SNAPSHOT_KEYS = [
-  'bgColor','fillColor','showArtwork','edgeWeight','edgeAngle',
+  'bgColor','fillBgColor','fillColor','showArtwork','edgeWeight','edgeAngle',
   'showFoundation','foundationColor','foundationWeight','foundationOpacity',
   'extrusionDepth','stemHeight',
   'rotX','rotY','rotZ','shapeW','shapeH','shapeD','panX','panY',
@@ -332,7 +372,8 @@ function initScene() {
 // ─── Tweakpane ────────────────────────────────────────────────
 
 function initPane() {
-  pane = new Pane({ title: '6th Street Logo' });
+  pane = new Pane({ title: '6th Street Logo', container: paneContainerRef.value });
+  pane.element.style.width = '100%';
 
   pane.addButton({ title: 'Load File  (OBJ / SVG)' }).on('click', () => {
     fileInputRef.value.click();
@@ -353,6 +394,8 @@ function initPane() {
 
   matFolder.addBinding(PARAMS, 'bgColor', { label: 'Background', view: 'color' })
     .on('change', ({ value }) => { scene.background = new THREE.Color(value); updateFill(); scheduleSnapshot(); });
+  matFolder.addBinding(PARAMS, 'fillBgColor', { label: 'Fill BG', view: 'color' })
+    .on('change', () => { updateFill(); scheduleSnapshot(); });
   matFolder.addBinding(PARAMS, 'showFill', { label: 'Fill' })
     .on('change', () => { updateFill(); scheduleSnapshot(); });
   matFolder.addBinding(PARAMS, 'showArtwork', { label: 'Stroke' })
@@ -664,7 +707,7 @@ function buildFaceLayers(group) {
   faceLayerGroups = [];
 
   const fillMat = () => new THREE.MeshBasicMaterial({
-    color: new THREE.Color(PARAMS.bgColor), side: THREE.DoubleSide,
+    color: new THREE.Color(PARAMS.fillBgColor), side: THREE.DoubleSide,
     depthTest: false, depthWrite: false,
   });
 
@@ -802,7 +845,7 @@ function updateFill() {
     if (!child.userData.isFillColor) return;
     child.visible = PARAMS.showFill;
     const mats = Array.isArray(child.material) ? child.material : [child.material];
-    mats.forEach(m => { if (m?.color && m.visible !== false) m.color.setStyle(PARAMS.bgColor); });
+    mats.forEach(m => { if (m?.color && m.visible !== false) m.color.setStyle(PARAMS.fillBgColor); });
   });
   // Swap which stroke set is active: face-layer strokes when fill is ON,
   // regular strokes (meshToLine) when fill is OFF.
@@ -1385,7 +1428,7 @@ function animate() {
   artworkMaterials.forEach(m    => { if (m) m.linewidth = scaledLinewidth(PARAMS.edgeWeight); });
   foundationMaterials.forEach(m => { if (m) m.linewidth = scaledLinewidth(PARAMS.foundationWeight); });
   restoreMainColors();
-  const mainFillBg = new THREE.Color(PARAMS.bgColor);
+  const mainFillBg = new THREE.Color(PARAMS.fillBgColor);
   fillMeshMaterials.forEach(m => { if (m) m.color.copy(mainFillBg); });
   scene.background.setStyle(PARAMS.bgColor);
   setCameraAspect(cw / MAIN_H);
@@ -1413,6 +1456,9 @@ function onWindowResize() {
 <style scoped>
 .viewer-container {
   position: relative;
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
   width: 100%;
   height: 100vh;
   background: #111111;
@@ -1420,21 +1466,27 @@ function onWindowResize() {
   box-sizing: border-box;
   --strip-h: 0px;
 }
+
+/* ── Left: canvas panels ───────────────────────────── */
+.viewer-left {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
 .canvas-container {
   width: 100%;
   height: 100%;
   border-radius: 12px;
   overflow: hidden;
 }
-/* Gap element that visually splits the canvas into two panels when
-   the preview strip is visible. Same color as the page background.
-   ::before/::after add concave corner pieces at the 4 inner corners
-   so both panels appear fully rounded. */
+
+/* Gap between main viewport and preview strip */
 .panel-divider {
   position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: calc(10px + var(--strip-h));
+  left: 0;
+  right: 0;
+  bottom: var(--strip-h);
   height: 8px;
   background: #111111;
   z-index: 1;
@@ -1449,32 +1501,83 @@ function onWindowResize() {
   height: calc(100% + 24px);
   pointer-events: none;
 }
-/* Left side: rounds bottom-left of main panel + top-left of preview panel.
-   No background-color — the transparent gradient areas must reveal the canvas,
-   not a fill color. The gap middle is transparent so panel-divider's own
-   background shows through. */
 .panel-divider::before {
   left: 0;
   background:
     radial-gradient(circle at 100% 0%,   transparent 12px, #111111 12px) 0 0    / 12px 12px no-repeat,
     radial-gradient(circle at 100% 100%, transparent 12px, #111111 12px) 0 100% / 12px 12px no-repeat;
 }
-/* Right side: rounds bottom-right of main panel + top-right of preview panel */
 .panel-divider::after {
   right: 0;
   background:
     radial-gradient(circle at 0% 0%,   transparent 12px, #111111 12px) 100% 0    / 12px 12px no-repeat,
     radial-gradient(circle at 0% 100%, transparent 12px, #111111 12px) 100% 100% / 12px 12px no-repeat;
 }
+
+/* ── Right: Tweakpane + palette panel ──────────────── */
+.viewer-right {
+  width: 260px;
+  flex-shrink: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1c1c1c;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.palette-panel {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  flex-shrink: 0;
+}
+.palette-label {
+  font-size: 10px;
+  font-family: sans-serif;
+  color: rgba(255, 255, 255, 0.35);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+.palette-swatches {
+  display: flex;
+  gap: 6px;
+}
+.palette-swatch {
+  flex: 1;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.12s, transform 0.1s;
+}
+.palette-swatch:hover {
+  border-color: rgba(255, 255, 255, 0.5);
+  transform: scale(1.08);
+}
+
+.pane-container {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.pane-container :deep(.tp-dfwv) {
+  width: 100% !important;
+  border-radius: 0;
+}
+
+/* ── Info bar ──────────────────────────────────────── */
 .info-bar {
   position: absolute;
-  bottom: 20px;
-  left: 20px;
+  bottom: 12px;
+  left: 12px;
   padding: 6px 10px;
   background: rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(4px);
   border-radius: 6px;
   font-size: 12px;
+  font-family: sans-serif;
   color: rgba(255, 255, 255, 0.5);
   pointer-events: none;
 }
