@@ -16,6 +16,15 @@ import { LineSegments2 }        from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import { LineMaterial }         from 'three/examples/jsm/lines/LineMaterial.js';
 import { Pane } from 'tweakpane';
+import spinForward     from '../animations/spinForward.js';
+import spinReverse     from '../animations/spinReverse.js';
+import axisFlip        from '../animations/axisFlip.js';
+import scaleEntrance   from '../animations/scaleEntrance.js';
+import extrudeFromFlat from '../animations/extrudeFromFlat.js';
+import drawIn          from '../animations/drawIn.js';
+import edgePulse       from '../animations/edgePulse.js';
+
+const ANIMATIONS = [spinForward, spinReverse, axisFlip, scaleEntrance, extrudeFromFlat, drawIn, edgePulse];
 
 const canvasRef            = ref(null);
 const fileInputRef         = ref(null);
@@ -39,23 +48,13 @@ let animGroup    = null;   // animation / scale / pan target
 let poseGroup    = null;   // manual orientation target
 let loadedObject = null;   // geometry; pivot offset on .position
 let gridGroup    = null;   // fixed XY grid guides — hidden in preview cells
+let faceGridGroup = null;  // face-aligned grids in poseGroup (rotate with model)
 let animationFrameId = null;
 let lastFrameTime    = null;
-
-// Spring state — normalized progress (0→1) mapped to actual rotation.
-// Works on 0–1 so the same damping/stiffness params feel consistent
-// regardless of how many degrees the spin covers.
-let spring = {
-  progress: 0,
-  vel:      0,
-  startY:   0,
-  targetY:  0,
-  active:   false,
-};
-// stiffness:50 damping:12 → ζ≈0.85, ~0.5% overshoot — slow, weighted
-// entrance feel. Comparable to Remotion { stiffness:50, damping:15, mass:1 }.
-// ~2s to settle. Right for a logo arriving on load, not a UI micro-interaction.
-const SPRING = { stiffness: 50, damping: 12, mass: 1 };
+// Active animation module — only one at a time.
+let currentAnim      = null;
+// Last W/H used to build faceGridGroup — skip rebuild when only D changes.
+let _faceGridW = null, _faceGridH = null;
 
 const FRUSTUM_SIZE = 4;
 const DEG2RAD      = Math.PI / 180;
@@ -79,6 +78,7 @@ const PREVIEW_SCHEMES = [
 // Cached flat arrays of materials — populated by collectMaterials() after
 // any applyEdgeMode / rebuild. Avoids per-frame scene traversal.
 let artworkMaterials    = [];
+let artworkLines        = [];   // LineSegments2 objects for artwork layer (used by drawIn)
 let foundationMaterials = [];
 let fillMeshMaterials   = [];
 
@@ -201,7 +201,8 @@ function applySnapshot(snap) {
   rebuildShape();
   if (animGroup) animGroup.position.set(PARAMS.panX, PARAMS.panY, 0);
   applyPivotOffset();
-  if (gridGroup) gridGroup.visible = PARAMS.showGrid;
+  if (gridGroup)     gridGroup.visible     = PARAMS.showGrid;
+  if (faceGridGroup) faceGridGroup.visible = PARAMS.showGrid;
   lastSnapshotJson = makeSnapshotJson();
 }
 
@@ -269,6 +270,41 @@ function createGridGuides() {
   return group;
 }
 
+// Face-aligned reference grids — live in poseGroup so they rotate with the model.
+// Left wall: YZ plane at x = -W  (face 2/7)
+// Floor:     XZ plane at y = -H  (face 4)
+function buildFaceGrids() {
+  const group = new THREE.Group();
+  const W = PARAMS.shapeW, H = PARAMS.shapeH;
+  const dim = 4, step = 0.5;
+
+  const baseMat = () => new THREE.LineBasicMaterial({ color: 0x163535, transparent: true, opacity: 0.55 });
+  const axisMat = () => new THREE.LineBasicMaterial({ color: 0x2d7070, transparent: true, opacity: 0.8  });
+
+  // — Left wall (YZ plane at x = -W) —
+  const wallPts = [], wallAxisPts = [];
+  for (let i = -dim; i <= dim; i += step) {
+    const pts = Math.abs(i) < 1e-6 ? wallAxisPts : wallPts;
+    pts.push(new THREE.Vector3(-W, i,    -dim), new THREE.Vector3(-W, i,    dim));  // along Z
+    pts.push(new THREE.Vector3(-W, -dim, i),    new THREE.Vector3(-W, dim,  i));    // along Y
+  }
+  if (wallPts.length)     group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(wallPts),     baseMat()));
+  if (wallAxisPts.length) group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(wallAxisPts), axisMat()));
+
+  // — Floor (XZ plane at y = -H) —
+  const floorPts = [], floorAxisPts = [];
+  for (let i = -dim; i <= dim; i += step) {
+    const pts = Math.abs(i) < 1e-6 ? floorAxisPts : floorPts;
+    pts.push(new THREE.Vector3(i,    -H, -dim), new THREE.Vector3(i,    -H, dim));  // along Z
+    pts.push(new THREE.Vector3(-dim, -H, i),    new THREE.Vector3(dim,  -H, i));    // along X
+  }
+  if (floorPts.length)     group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(floorPts),     baseMat()));
+  if (floorAxisPts.length) group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(floorAxisPts), axisMat()));
+
+  group.visible = PARAMS.showGrid;
+  return group;
+}
+
 // ─── Scene ────────────────────────────────────────────────────
 
 function initScene() {
@@ -306,7 +342,11 @@ function initPane() {
   pane.addBinding(PARAMS, 'showPreviews', { label: 'Color Previews' })
     .on('change', () => { showPreviewsReactive.value = PARAMS.showPreviews; updateStripHeight(); onWindowResize(); });
   pane.addBinding(PARAMS, 'showGrid', { label: 'Show Grid' })
-    .on('change', () => { if (gridGroup) gridGroup.visible = PARAMS.showGrid; scheduleSnapshot(); });
+    .on('change', () => {
+      if (gridGroup)     gridGroup.visible     = PARAMS.showGrid;
+      if (faceGridGroup) faceGridGroup.visible = PARAMS.showGrid;
+      scheduleSnapshot();
+    });
   pane.addBinding(PARAMS, 'showFaceNumbers', { label: 'Face Numbers' })
     .on('change', () => { updateFaceNumbers(); });
 
@@ -370,7 +410,13 @@ function initPane() {
 
   // Animations — triggered explorations, each fires a canned animation on animGroup
   const animFolder = pane.addFolder({ title: 'Animations', expanded: true });
-  animFolder.addButton({ title: 'Spin 360°' }).on('click', triggerSpin720);
+  animFolder.addButton({ title: 'Spin Forward     [1]' }).on('click', () => triggerAnimation(spinForward));
+  animFolder.addButton({ title: 'Spin Reverse     [2]' }).on('click', () => triggerAnimation(spinReverse));
+  animFolder.addButton({ title: 'Axis Flip X      [3]' }).on('click', () => triggerAnimation(axisFlip));
+  animFolder.addButton({ title: 'Scale Entrance   [4]' }).on('click', () => triggerAnimation(scaleEntrance));
+  animFolder.addButton({ title: 'Extrude Flat     [5]' }).on('click', () => triggerAnimation(extrudeFromFlat));
+  animFolder.addButton({ title: 'Draw In          [6]' }).on('click', () => triggerAnimation(drawIn));
+  animFolder.addButton({ title: 'Edge Pulse       [7]' }).on('click', () => triggerAnimation(edgePulse));
 
   // Pivot — offsets loadedObject within poseGroup, shifting the rotation axis
   const pivotFolder = pane.addFolder({ title: 'Pivot', expanded: false });
@@ -398,6 +444,22 @@ function scaledLinewidth(weight) {
     ? h - Math.round(Math.min(220, canvasRef.value.clientWidth / PREVIEW_SCHEMES.length))
     : h;
   return weight * (mainH / REFERENCE_H);
+}
+
+// ─── Animation runner ─────────────────────────────────────────
+
+function makeAnimCtx() {
+  return {
+    animGroup, poseGroup, loadedObject,
+    PARAMS, artworkLines, artworkMaterials,
+    scaledLinewidth, rebuildShape,
+  };
+}
+
+function triggerAnimation(anim) {
+  if (currentAnim?.active) currentAnim.cancel(makeAnimCtx());
+  currentAnim = anim;
+  anim.start(makeAnimCtx());
 }
 
 function makeEdgeMaterial() {
@@ -789,6 +851,7 @@ function updateFoundation() {
 // Used by preview rendering to swap colors without traversal per frame.
 function collectMaterials() {
   artworkMaterials    = [];
+  artworkLines        = [];
   foundationMaterials = [];
   fillMeshMaterials   = [];
   loadedObject?.traverse((child) => {
@@ -799,6 +862,7 @@ function collectMaterials() {
       // Face-layer strokes use dynamic renderOrders — identify by userData flag.
       if (child.userData.isFaceLayerStroke || child.renderOrder === 0) {
         artworkMaterials.push(child.material);
+        artworkLines.push(child);
       } else {
         foundationMaterials.push(child.material);
       }
@@ -905,6 +969,15 @@ function rebuildDefaultLogo() {
   applyEdgeMode(loadedObject);
   applyPivotOffset();
   poseGroup.add(loadedObject);
+
+  // Rebuild face grids only when W or H actually change — not every D update
+  if (PARAMS.shapeW !== _faceGridW || PARAMS.shapeH !== _faceGridH || !faceGridGroup) {
+    if (faceGridGroup) poseGroup.remove(faceGridGroup);
+    faceGridGroup = buildFaceGrids();
+    poseGroup.add(faceGridGroup);
+    _faceGridW = PARAMS.shapeW;
+    _faceGridH = PARAMS.shapeH;
+  }
 }
 
 // ─── File loading ─────────────────────────────────────────────
@@ -977,7 +1050,8 @@ function centerAndFit(object) {
 function clearScene() {
   if (animGroup) {
     scene.remove(animGroup);
-    animGroup = null; poseGroup = null; loadedObject = null;
+    animGroup = null; poseGroup = null; loadedObject = null; faceGridGroup = null;
+    currentAnim = null; _faceGridW = null; _faceGridH = null;
   }
 }
 
@@ -986,6 +1060,12 @@ function mountIntoScene() {
   poseGroup = new THREE.Group();
   applyPivotOffset();
   poseGroup.add(loadedObject);
+
+  // Face-aligned reference grids rotate with the model
+  faceGridGroup = buildFaceGrids();
+  poseGroup.add(faceGridGroup);
+  _faceGridW = PARAMS.shapeW;
+  _faceGridH = PARAMS.shapeH;
 
   // animGroup is the animation / scale / pan target
   animGroup = new THREE.Group();
@@ -996,7 +1076,7 @@ function mountIntoScene() {
 // ─── Transform sync ───────────────────────────────────────────
 
 function resetTransformState(isSVG) {
-  spring.active = false; spring.vel = 0;
+  if (currentAnim?.active) { currentAnim.cancel(makeAnimCtx()); currentAnim = null; }
   // For SVG, force a top-down view. For the default logo, preserve PARAMS
   // rotation (already set to the preset defaults) — don't zero it out.
   if (isSVG) {
@@ -1057,6 +1137,11 @@ function onKeyDown(e) {
     e.preventDefault();
     if (e.shiftKey) redo(); else undo();
   }
+  if (!mod) {
+    const anims = { '1': spinForward, '2': spinReverse, '3': axisFlip,
+                    '4': scaleEntrance, '5': extrudeFromFlat, '6': drawIn, '7': edgePulse };
+    if (anims[e.key]) triggerAnimation(anims[e.key]);
+  }
 }
 
 function onKeyUp(e) {
@@ -1114,7 +1199,7 @@ function onMouseWheel(e) {
 // ─── Actions ──────────────────────────────────────────────────
 
 function resetView() {
-  spring.active = false; spring.vel = 0;
+  if (currentAnim?.active) { currentAnim.cancel(makeAnimCtx()); currentAnim = null; }
   commitSnapshot();
   PARAMS.rotX = isSVGLoaded ? -90 : DEFAULT_ROT_X;
   PARAMS.rotY = isSVGLoaded ? 0 : DEFAULT_ROT_Y;
@@ -1222,34 +1307,7 @@ function downloadPreset() {
 }
 
 // ─── Triggered animations ─────────────────────────────────────
-
-// Step the spring one frame forward. Spring operates on normalized
-// progress (0 → 1); we map that to actual Y rotation range so damping
-// values feel consistent regardless of spin distance.
-function stepSpring(dt) {
-  const { stiffness, damping, mass } = SPRING;
-  const error = spring.progress - 1; // target is always normalized 1
-  const force = -stiffness * error - damping * spring.vel;
-  spring.vel      += (force / mass) * dt;
-  spring.progress += spring.vel * dt;
-  animGroup.rotation.y = spring.startY + (spring.targetY - spring.startY) * spring.progress;
-
-  if (Math.abs(error) < 0.0003 && Math.abs(spring.vel) < 0.0003) {
-    spring.progress      = 1;
-    spring.vel           = 0;
-    spring.active        = false;
-    animGroup.rotation.y = spring.targetY;
-  }
-}
-
-function triggerSpin720() {
-  if (!animGroup) return;
-  spring.startY   = animGroup.rotation.y;
-  spring.targetY  = animGroup.rotation.y + Math.PI * 2; // 360°
-  spring.progress = 0;
-  spring.vel      = 0;
-  spring.active   = true;
-}
+// Animation modules live in src/animations/. Use triggerAnimation(module) to run one.
 
 // ─── Render loop ──────────────────────────────────────────────
 
@@ -1260,7 +1318,7 @@ function animate() {
   const dt  = lastFrameTime ? Math.min((now - lastFrameTime) / 1000, 0.05) : 0;
   lastFrameTime = now;
 
-  if (spring.active && animGroup) stepSpring(dt);
+  if (currentAnim?.active) currentAnim.step(makeAnimCtx(), dt);
   updateFaceLayerOrders();
 
   const cw = canvasRef.value.clientWidth;
@@ -1290,7 +1348,8 @@ function animate() {
 
   // ── Preview cells (bottom strip) ─────────────────────────────
   // Hide grid + set resolution to cell size so line weight is proportional.
-  if (gridGroup) gridGroup.visible = false;
+  if (gridGroup)     gridGroup.visible     = false;
+  if (faceGridGroup) faceGridGroup.visible = false;
   const allLineMats = [...artworkMaterials, ...foundationMaterials];
   allLineMats.forEach(m => m.resolution?.set(cellW, STRIP_H));
   // LineMaterial.linewidth is in screen-space pixels. The preview strip is
@@ -1321,7 +1380,8 @@ function animate() {
   });
 
   // Restore grid, resolution, linewidths, colors, camera
-  if (gridGroup) gridGroup.visible = PARAMS.showGrid;
+  if (gridGroup)     gridGroup.visible     = PARAMS.showGrid;
+  if (faceGridGroup) faceGridGroup.visible = PARAMS.showGrid;
   allLineMats.forEach(m => m.resolution?.set(cw, MAIN_H));
   artworkMaterials.forEach(m    => { if (m) m.linewidth = scaledLinewidth(PARAMS.edgeWeight); });
   foundationMaterials.forEach(m => { if (m) m.linewidth = scaledLinewidth(PARAMS.foundationWeight); });
