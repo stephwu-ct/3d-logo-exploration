@@ -679,7 +679,7 @@ function buildFaceLayers(group) {
   // verticals pass through (-W, ±H, ±D) as interior points, so no cap is drawn
   // there. These stubs end at each junction, placing an order-4 orange cap that
   // covers the teal notch left by the order-3 fill at those corners.
-  const eps = 0.02;
+  const eps = 0.001;
   const leftStroke = addStroke([
     // Outer boundary — no internal crossbar at y=H
     -W,     H + sH,-D,  -W,    -H,-D,  // full back vertical
