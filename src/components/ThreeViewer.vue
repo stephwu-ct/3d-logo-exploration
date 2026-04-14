@@ -704,7 +704,7 @@ function buildFaceLayers(group) {
   const cbGeo = new LineSegmentsGeometry();
   cbGeo.setPositions(new Float32Array([-W, H, -D,  -W, H, D]));
   crossbarStroke = new LineSegments2(cbGeo, makeEdgeMaterial());
-  crossbarStroke.renderOrder = 2;
+  crossbarStroke.renderOrder = 2.5; // above order-2 verticals so caps aren't cut off
   crossbarStroke.visible = false;
   crossbarStroke.userData.isFaceLayerStroke = true;
   crossbarStroke.userData.isCrossbarStroke  = true;
@@ -727,10 +727,12 @@ function updateFaceLayerOrders() {
     // Track left+stem facing for crossbar visibility below
     if (localNormal.x < 0 && localNormal.y === 0 && localNormal.z === 0) leftStemFront = front;
   });
-  // Crossbar (stem-box junction): visible only from underside (left+stem back-facing)
+  // Crossbar (stem-box junction): visible only from underside (left+stem back-facing).
+  // renderOrder 2.5 ensures it draws AFTER the order-2 vertical leftStroke so its
+  // endpoint caps aren't covered by the vertical line rectangles at the junction.
   if (crossbarStroke) {
     crossbarStroke.visible = PARAMS.showArtwork && !leftStemFront;
-    crossbarStroke.renderOrder = 2;
+    crossbarStroke.renderOrder = 2.5;
   }
 }
 
