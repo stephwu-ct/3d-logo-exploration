@@ -704,7 +704,7 @@ function buildFaceLayers(group) {
   const cbGeo = new LineSegmentsGeometry();
   cbGeo.setPositions(new Float32Array([-W, H, -D,  -W, H, D]));
   crossbarStroke = new LineSegments2(cbGeo, makeEdgeMaterial());
-  crossbarStroke.renderOrder = 2.5; // above order-2 verticals so caps aren't cut off
+  crossbarStroke.renderOrder = 4.5; // above all fills+strokes (1–4) when visible
   crossbarStroke.visible = false;
   crossbarStroke.userData.isFaceLayerStroke = true;
   crossbarStroke.userData.isCrossbarStroke  = true;
@@ -728,11 +728,12 @@ function updateFaceLayerOrders() {
     if (localNormal.x < 0 && localNormal.y === 0 && localNormal.z === 0) leftStemFront = front;
   });
   // Crossbar (stem-box junction): visible only from underside (left+stem back-facing).
-  // renderOrder 2.5 ensures it draws AFTER the order-2 vertical leftStroke so its
-  // endpoint caps aren't covered by the vertical line rectangles at the junction.
+  // renderOrder 4.5 — above ALL face-layer fills (1/3) and strokes (2/4) — because
+  // the crossbar runs exactly along the top face's left edge. topFill (order 3) would
+  // cover it at any lower value. We want it on top of everything when visible.
   if (crossbarStroke) {
     crossbarStroke.visible = PARAMS.showArtwork && !leftStemFront;
-    crossbarStroke.renderOrder = 2.5;
+    crossbarStroke.renderOrder = 4.5;
   }
 }
 
