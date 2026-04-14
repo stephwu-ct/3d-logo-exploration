@@ -22,9 +22,7 @@ import axisFlip        from '../animations/axisFlip.js';
 import scaleEntrance   from '../animations/scaleEntrance.js';
 import extrudeFromFlat from '../animations/extrudeFromFlat.js';
 import drawIn          from '../animations/drawIn.js';
-import edgePulse       from '../animations/edgePulse.js';
-
-const ANIMATIONS = [spinForward, spinReverse, axisFlip, scaleEntrance, extrudeFromFlat, drawIn, edgePulse];
+const ANIMATIONS = [spinForward, spinReverse, axisFlip, scaleEntrance, extrudeFromFlat, drawIn];
 
 const canvasRef            = ref(null);
 const fileInputRef         = ref(null);
@@ -123,7 +121,7 @@ const PARAMS = {
   showPreviews:     true,
   showGrid:         false,
   hideBodyCrossbar: false,
-  showFill:         false,
+  showFill:         true,
   showFaceNumbers:  false,
 };
 
@@ -416,7 +414,6 @@ function initPane() {
   animFolder.addButton({ title: 'Scale Entrance   [4]' }).on('click', () => triggerAnimation(scaleEntrance));
   animFolder.addButton({ title: 'Extrude Flat     [5]' }).on('click', () => triggerAnimation(extrudeFromFlat));
   animFolder.addButton({ title: 'Draw In          [6]' }).on('click', () => triggerAnimation(drawIn));
-  animFolder.addButton({ title: 'Edge Pulse       [7]' }).on('click', () => triggerAnimation(edgePulse));
 
   // Pivot — offsets loadedObject within poseGroup, shifting the rotation axis
   const pivotFolder = pane.addFolder({ title: 'Pivot', expanded: false });
@@ -956,6 +953,7 @@ function loadDefaultLogo() {
   loadedObject = buildDefaultGroup();
   centerAndFit(loadedObject);
   applyEdgeMode(loadedObject);
+  updateFill();
   mountIntoScene();
   resetTransformState(false);
   info.value = '6th Street Logo';
@@ -967,6 +965,7 @@ function rebuildDefaultLogo() {
   loadedObject = buildDefaultGroup();
   centerAndFit(loadedObject);
   applyEdgeMode(loadedObject);
+  updateFill();
   applyPivotOffset();
   poseGroup.add(loadedObject);
 
@@ -1139,7 +1138,7 @@ function onKeyDown(e) {
   }
   if (!mod) {
     const anims = { '1': spinForward, '2': spinReverse, '3': axisFlip,
-                    '4': scaleEntrance, '5': extrudeFromFlat, '6': drawIn, '7': edgePulse };
+                    '4': scaleEntrance, '5': extrudeFromFlat, '6': drawIn };
     if (anims[e.key]) triggerAnimation(anims[e.key]);
   }
 }

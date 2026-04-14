@@ -1,47 +1,80 @@
-// Animation 6 — Draw in: reveal edge segments one-by-one via setPositions().
-// Uses a degenerate segment for "hidden" state to avoid touching .visible
-// (which is managed by updateArtwork/updateFaceLayerOrders elsewhere).
-const RATE       = 20; // segments per second
+// Animation 6 — Draw in: reveal edge segments in counter-clockwise order,
+// ending at the back faces.
+//
+// Sort key: (midZ - midX) descending in model space.
+// At the default Y=45° pose, world depth = (z - x) / √2, so this key
+// ranks front-left edges first and back-right edges last — a counter-
+// clockwise sweep from the viewer's perspective ending at the back.
+//
+// Segments are interleaved across all visible artwork lines, so the
+// sweep crosses face boundaries smoothly.
+
+const RATE       = 50; // segments per second
 const DEGENERATE = new Float32Array([0, 0, 0, 0, 0, 0]); // zero-length, invisible
 
-const _state = { chunks: [], elapsed: 0, totalSegs: 0 };
+let _state = null;
 
 export default {
   name: 'drawIn',
   active: false,
 
   start({ artworkLines }) {
-    _state.chunks = artworkLines
-      .filter(l => !l.userData.isCrossbarStroke)
+    const lineData = artworkLines
+      .filter(l => l.visible && !l.userData.isCrossbarStroke)
       .filter(l => l.geometry?.attributes?.instanceStart)
       .map(line => {
         const attr = line.geometry.attributes.instanceStart;
         const segs = attr.data.array.slice(0, attr.count * 6); // copy
-        line.geometry.setPositions(DEGENERATE);
         return { line, segs, n: attr.count };
       });
 
-    _state.totalSegs = _state.chunks.reduce((sum, c) => sum + c.n, 0);
-    _state.elapsed   = 0;
+    if (!lineData.length) return;
 
-    if (_state.totalSegs === 0) return;
+    // Build a flat sorted list of every segment across all lines.
+    const order = [];
+    lineData.forEach(({ segs, n }, li) => {
+      for (let i = 0; i < n; i++) {
+        const midX = (segs[i * 6 + 0] + segs[i * 6 + 3]) / 2;
+        const midZ = (segs[i * 6 + 2] + segs[i * 6 + 5]) / 2;
+        order.push({ li, i, key: midZ - midX });
+      }
+    });
+    // Descending: front-left (high key) → back-right (low key)
+    order.sort((a, b) => b.key - a.key);
+
+    // Hide all lines with a degenerate segment
+    lineData.forEach(({ line }) => line.geometry.setPositions(DEGENERATE));
+
+    _state = { lineData, order, elapsed: 0 };
     this.active = true;
   },
 
   step(_ctx, dt) {
-    if (!this.active) return;
+    if (!this.active || !_state) return;
     _state.elapsed += dt;
 
-    const revealed = Math.min(_state.totalSegs, Math.floor(_state.elapsed * RATE));
-    let remaining  = revealed;
+    const revealed = Math.min(_state.order.length, Math.floor(_state.elapsed * RATE));
 
-    _state.chunks.forEach(({ line, segs, n }) => {
-      const show = Math.min(n, remaining);
-      remaining  = Math.max(0, remaining - n);
-      line.geometry.setPositions(show === 0 ? DEGENERATE : segs.slice(0, show * 6));
+    // Collect which segment indices are revealed per line
+    const perLine = _state.lineData.map(() => []);
+    for (let r = 0; r < revealed; r++) {
+      const { li, i } = _state.order[r];
+      perLine[li].push(i);
+    }
+
+    // Rebuild each line's geometry with only its revealed segments
+    _state.lineData.forEach(({ line, segs }, li) => {
+      const idxs = perLine[li];
+      if (idxs.length === 0) {
+        line.geometry.setPositions(DEGENERATE);
+      } else {
+        const buf = new Float32Array(idxs.length * 6);
+        idxs.forEach((si, bi) => buf.set(segs.subarray(si * 6, si * 6 + 6), bi * 6));
+        line.geometry.setPositions(buf);
+      }
     });
 
-    if (revealed >= _state.totalSegs) {
+    if (revealed >= _state.order.length) {
       this._restore();
       this.active = false;
     }
@@ -53,7 +86,8 @@ export default {
   },
 
   _restore() {
-    _state.chunks.forEach(({ line, segs }) => line.geometry.setPositions(segs));
-    _state.chunks = [];
+    if (!_state) return;
+    _state.lineData.forEach(({ line, segs }) => line.geometry.setPositions(segs));
+    _state = null;
   },
 };
