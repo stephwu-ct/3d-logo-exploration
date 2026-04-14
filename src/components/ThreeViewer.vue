@@ -903,18 +903,22 @@ function updateFill() {
 }
 
 function updateArtwork() {
-  const useLayers  = PARAMS.showFill && faceLayerGroups.length > 0;
-  const strokeColor = PARAMS.knockout ? PARAMS.bgColor : PARAMS.fillColor;
+  const useLayers = PARAMS.showFill && faceLayerGroups.length > 0;
+  // Knockout inverts fill/stroke roles for face-layer strokes only: they become
+  // the background color, acting as thin separating lines between solid-colored
+  // fill planes. Regular strokes (fill OFF, shows all crossbars) always use
+  // fillColor so the full wireframe stays visible regardless of knockout.
+  const faceLayerColor = PARAMS.knockout ? PARAMS.bgColor : PARAMS.fillColor;
   loadedObject?.traverse((child) => {
     if (!child.isLineSegments2) return;
     if (child.userData.isFaceLayerStroke) {
       // Face-layer strokes: active only when fill is ON
-      child.material.color.setStyle(strokeColor);
+      child.material.color.setStyle(faceLayerColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
       child.visible = useLayers && PARAMS.showArtwork;
     } else if (child.renderOrder === 0) {
-      // Regular artwork strokes: active only when fill is OFF
-      child.material.color.setStyle(strokeColor);
+      // Regular artwork strokes: active only when fill is OFF — always fillColor
+      child.material.color.setStyle(PARAMS.fillColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
       child.visible = !useLayers && PARAMS.showArtwork;
     }
@@ -978,10 +982,11 @@ function applySchemeColors(stroke) {
 }
 
 // Restore to the user's chosen colors after a preview render.
+// Uses updateArtwork() so face-layer vs regular strokes each get the correct
+// color (they differ in knockout mode).
 function restoreMainColors() {
-  const ac = new THREE.Color(PARAMS.knockout ? PARAMS.bgColor : PARAMS.fillColor);
+  updateArtwork();
   const fc = new THREE.Color(PARAMS.foundationColor);
-  artworkMaterials.forEach(m    => { if (m) m.color.copy(ac); });
   foundationMaterials.forEach(m => { if (m) m.color.copy(fc); });
 }
 
