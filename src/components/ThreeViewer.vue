@@ -165,6 +165,7 @@ const PARAMS = {
   showFill:         true,
   showFaceNumbers:  false,
   zoom: 1,
+  knockout: false,
 };
 
 const SNAPSHOT_KEYS = [
@@ -172,7 +173,7 @@ const SNAPSHOT_KEYS = [
   'showFoundation','foundationColor','foundationWeight','foundationOpacity',
   'extrusionDepth','stemHeight',
   'rotX','rotY','rotZ','shapeW','shapeH','shapeD','cornerRadius','panX','panY',
-  'pivotX','pivotY','pivotZ','showGrid','hideBodyCrossbar','showFill','zoom',
+  'pivotX','pivotY','pivotZ','showGrid','hideBodyCrossbar','showFill','zoom','knockout',
 ];
 
 let cachedSVGPaths    = null;
@@ -399,6 +400,8 @@ function initPane() {
   matFolder.addBinding(PARAMS, 'fillBgColor', { label: 'Fill BG', view: 'color' })
     .on('change', () => { updateFill(); scheduleSnapshot(); });
   matFolder.addBinding(PARAMS, 'showFill', { label: 'Fill' })
+    .on('change', () => { updateFill(); scheduleSnapshot(); });
+  matFolder.addBinding(PARAMS, 'knockout', { label: 'Knockout' })
     .on('change', () => { updateFill(); scheduleSnapshot(); });
   matFolder.addBinding(PARAMS, 'showArtwork', { label: 'Stroke' })
     .on('change', () => { updateArtwork(); scheduleSnapshot(); });
@@ -883,12 +886,16 @@ function updateFaceLayerOrders() {
 }
 
 function updateFill() {
+  // Knockout: fill planes use the foreground (stroke) color so faces read as
+  // solid shapes; strokes are drawn in the background color and act as thin
+  // separator lines between faces. Normal mode is the inverse.
+  const planeColor = PARAMS.knockout ? PARAMS.fillColor : PARAMS.fillBgColor;
   loadedObject?.traverse((child) => {
     if (!child.isMesh || child.isLineSegments2) return;
     if (!child.userData.isFillColor) return;
     child.visible = PARAMS.showFill;
     const mats = Array.isArray(child.material) ? child.material : [child.material];
-    mats.forEach(m => { if (m?.color && m.visible !== false) m.color.setStyle(PARAMS.fillBgColor); });
+    mats.forEach(m => { if (m?.color && m.visible !== false) m.color.setStyle(planeColor); });
   });
   // Swap which stroke set is active: face-layer strokes when fill is ON,
   // regular strokes (meshToLine) when fill is OFF.
@@ -896,17 +903,18 @@ function updateFill() {
 }
 
 function updateArtwork() {
-  const useLayers = PARAMS.showFill && faceLayerGroups.length > 0;
+  const useLayers  = PARAMS.showFill && faceLayerGroups.length > 0;
+  const strokeColor = PARAMS.knockout ? PARAMS.bgColor : PARAMS.fillColor;
   loadedObject?.traverse((child) => {
     if (!child.isLineSegments2) return;
     if (child.userData.isFaceLayerStroke) {
       // Face-layer strokes: active only when fill is ON
-      child.material.color.setStyle(PARAMS.fillColor);
+      child.material.color.setStyle(strokeColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
       child.visible = useLayers && PARAMS.showArtwork;
     } else if (child.renderOrder === 0) {
       // Regular artwork strokes: active only when fill is OFF
-      child.material.color.setStyle(PARAMS.fillColor);
+      child.material.color.setStyle(strokeColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
       child.visible = !useLayers && PARAMS.showArtwork;
     }
@@ -971,7 +979,7 @@ function applySchemeColors(stroke) {
 
 // Restore to the user's chosen colors after a preview render.
 function restoreMainColors() {
-  const ac = new THREE.Color(PARAMS.fillColor);
+  const ac = new THREE.Color(PARAMS.knockout ? PARAMS.bgColor : PARAMS.fillColor);
   const fc = new THREE.Color(PARAMS.foundationColor);
   artworkMaterials.forEach(m    => { if (m) m.color.copy(ac); });
   foundationMaterials.forEach(m => { if (m) m.color.copy(fc); });
@@ -1472,7 +1480,7 @@ function animate() {
   artworkMaterials.forEach(m    => { if (m) m.linewidth = scaledLinewidth(PARAMS.edgeWeight); });
   foundationMaterials.forEach(m => { if (m) m.linewidth = scaledLinewidth(PARAMS.foundationWeight); });
   restoreMainColors();
-  const mainFillBg = new THREE.Color(PARAMS.fillBgColor);
+  const mainFillBg = new THREE.Color(PARAMS.knockout ? PARAMS.fillColor : PARAMS.fillBgColor);
   fillMeshMaterials.forEach(m => { if (m) m.color.copy(mainFillBg); });
   scene.background.setStyle(PARAMS.bgColor);
   setCameraAspect(cw / MAIN_H);
