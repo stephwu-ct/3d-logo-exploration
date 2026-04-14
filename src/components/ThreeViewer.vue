@@ -141,6 +141,12 @@ const meshToLine       = new WeakMap(); // mesh → artwork LineSegments2
 const meshToFoundation = new WeakMap(); // mesh → foundation LineSegments2
 const meshToFillColor  = new WeakMap(); // mesh → color-pass fill sibling
 
+// Per-face painter layers — populated by buildFaceLayers for the default logo.
+// Each entry: { fill: Mesh, stroke: LineSegments2, localNormal: Vector3 }
+// renderOrders 1/2 = back (fill/stroke), 3/4 = front. Updated every frame.
+let faceLayerGroups = [];
+let crossbarStroke  = null; // junction edge between top face and stem, underside-only
+
 // ─── History ──────────────────────────────────────────────────
 
 const history          = [];
@@ -537,10 +543,9 @@ function applyEdgeMode(group) {
     if (mesh.userData.hideFill) {
       mesh.material = new THREE.MeshBasicMaterial({ visible: false });
     } else {
-      const side = mesh.userData.isStem ? THREE.DoubleSide : THREE.FrontSide;
       mesh.material = new THREE.MeshBasicMaterial({
-        color: new THREE.Color(PARAMS.bgColor), side,
-        polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 8,
+        color: new THREE.Color(PARAMS.bgColor), side: THREE.DoubleSide,
+        depthWrite: false, depthTest: false,
       });
       mesh.renderOrder = -1;
       mesh.visible = PARAMS.showFill;
@@ -581,68 +586,152 @@ function applyEdgeMode(group) {
     mesh.parent.add(found);
     meshToFoundation.set(mesh, found);
   });
-  if (group.userData.hasBodyFills)       buildBodyFaceFill(group);
-  if (group.userData.hasCombinedStemFill) buildCombinedStemFill(group);
+  if (group.userData.hasBodyFills) buildFaceLayers(group);
   collectMaterials();
   buildFaceLabels(group);
 }
 
-// Builds individual PlaneGeometry fill meshes for the three visible box faces:
-// right (+X), top (+Y), bottom (-Y). Using separate planes instead of a multi-material
-// BoxGeometry avoids the triangle-seam artifact that appears at certain viewing angles.
-function buildBodyFaceFill(group) {
-  const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD;
+// Builds 4 face-layer groups for the default logo using the painter's algorithm.
+// Each group has a fill plane + a LineSegments2 with that face's boundary edges.
+// renderOrders 1/2 (back fill/stroke) and 3/4 (front fill/stroke) are updated
+// every frame based on the face normal's world-space Z component.
+// All use depthTest: false — no depth buffer, pure paint-order compositing.
+//
+//   Face groups: right (+X), top (+Y), bottom (-Y), combined left+stem (-X)
+//   Painter order: back_fill → back_stroke → front_fill → front_stroke
+//
+function buildFaceLayers(group) {
+  const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD, sH = PARAMS.stemHeight;
+  faceLayerGroups = [];
+
   const fillMat = () => new THREE.MeshBasicMaterial({
     color: new THREE.Color(PARAMS.bgColor), side: THREE.DoubleSide,
-    polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 8,
+    depthTest: false, depthWrite: false,
   });
-  const faces = [
-    // Right face (+X): plane spans depth × height, normal along +X
-    { geo: new THREE.PlaneGeometry(D * 2, H * 2), pos: new THREE.Vector3(W, 0, 0),  rot: new THREE.Euler(0, -Math.PI / 2, 0) },
-    // Top face (+Y): plane spans width × depth, normal along +Y
-    { geo: new THREE.PlaneGeometry(W * 2, D * 2), pos: new THREE.Vector3(0, H, 0),  rot: new THREE.Euler(Math.PI / 2, 0, 0) },
-    // Bottom face (-Y): plane spans width × depth, normal along -Y
-    { geo: new THREE.PlaneGeometry(W * 2, D * 2), pos: new THREE.Vector3(0, -H, 0), rot: new THREE.Euler(-Math.PI / 2, 0, 0) },
-  ];
-  faces.forEach(({ geo, pos, rot }) => {
-    const mesh = new THREE.Mesh(geo, fillMat());
-    mesh.position.copy(pos);
-    mesh.rotation.copy(rot);
-    mesh.renderOrder = -1;
-    mesh.visible = PARAMS.showFill;
-    mesh.userData.isFillColor = true;
-    mesh.userData.isBodyFaceFill = true;
-    group.add(mesh);
-  });
+
+  const addFill = (geo, px, py, pz, rx, ry, rz) => {
+    const m = new THREE.Mesh(geo, fillMat());
+    m.position.set(px, py, pz);
+    m.rotation.set(rx, ry, rz);
+    m.renderOrder = 1;
+    m.visible = PARAMS.showFill;
+    m.userData.isFillColor = true;
+    m.userData.isFaceLayerFill = true;
+    group.add(m);
+    return m;
+  };
+
+  const addStroke = (positions) => {
+    const geo = new LineSegmentsGeometry();
+    geo.setPositions(new Float32Array(positions));
+    const l = new LineSegments2(geo, makeEdgeMaterial());
+    l.renderOrder = 2;
+    l.visible = PARAMS.showFill && PARAMS.showArtwork;
+    l.userData.isFaceLayerStroke = true;
+    group.add(l);
+    return l;
+  };
+
+  // Right face (+X)
+  const rightFill   = addFill(new THREE.PlaneGeometry(D * 2, H * 2), W, 0, 0, 0, -Math.PI / 2, 0);
+  const rightStroke = addStroke([
+    W, H,-D,  W, H, D,
+    W, H, D,  W,-H, D,
+    W,-H, D,  W,-H,-D,
+    W,-H,-D,  W, H,-D,
+  ]);
+  faceLayerGroups.push({ fill: rightFill, stroke: rightStroke, localNormal: new THREE.Vector3(1, 0, 0) });
+
+  // Top face (+Y)
+  // Omit the left edge (-W,H,-D)→(-W,H,D) — it sits exactly on the combined
+  // left+stem face plane and its round endpoints create the same crossbar seam
+  // we suppress everywhere else. The left+stem vertical edges pass through
+  // those points and implicitly mark the boundary.
+  const topFill   = addFill(new THREE.PlaneGeometry(W * 2, D * 2), 0, H, 0, Math.PI / 2, 0, 0);
+  const topStroke = addStroke([
+     W, H,-D, -W, H,-D,  // back edge
+    -W, H, D,  W, H, D,  // front edge
+     W, H, D,  W, H,-D,  // right edge
+  ]);
+  faceLayerGroups.push({ fill: topFill, stroke: topStroke, localNormal: new THREE.Vector3(0, 1, 0) });
+
+  // Bottom face (-Y)
+  // Omit the left edge (-W,-H,-D)→(-W,-H,D) for the same reason as the top face:
+  // the left+stem vertical edges already pass through those points.
+  const botFill   = addFill(new THREE.PlaneGeometry(W * 2, D * 2), 0, -H, 0, -Math.PI / 2, 0, 0);
+  const botStroke = addStroke([
+     W,-H,-D, -W,-H,-D,  // back edge
+    -W,-H, D,  W,-H, D,  // front edge
+     W,-H, D,  W,-H,-D,  // right edge
+  ]);
+  faceLayerGroups.push({ fill: botFill, stroke: botStroke, localNormal: new THREE.Vector3(0, -1, 0) });
+
+  // Combined left face + stem (-X): one rectangle spanning y=-H to y=H+sH
+  // heightSegments:2 keeps a vertex row at y=0 (local) = y=H (group), preventing
+  // a triangle diagonal from crossing the box/stem junction.
+  const leftFill   = addFill(
+    new THREE.PlaneGeometry(D * 2, 2 * H + sH, 1, 2),
+    -W, sH / 2, 0,  // center Y of combined range [-H, H+sH]
+    0, -Math.PI / 2, 0
+  );
+  // Tiny stubs (epsilon = 0.02) to force round caps at the four corner junctions.
+  // LineSegments2 only draws round caps at segment ENDPOINTS — the left+stem
+  // verticals pass through (-W, ±H, ±D) as interior points, so no cap is drawn
+  // there. These stubs end at each junction, placing an order-4 orange cap that
+  // covers the teal notch left by the order-3 fill at those corners.
+  const eps = 0.02;
+  const leftStroke = addStroke([
+    // Outer boundary — no internal crossbar at y=H
+    -W,     H + sH,-D,  -W,    -H,-D,  // full back vertical
+    -W,    -H,-D,  -W,    -H, D,        // bottom
+    -W,    -H, D,  -W, H + sH, D,       // full front vertical
+    -W, H + sH, D, -W, H + sH,-D,       // stem top
+    // Corner stubs — only ε long, invisible as lines but cap covers the notch
+    -W + eps, H,-D,  -W, H,-D,   // top-back-left junction
+    -W + eps, H, D,  -W, H, D,   // top-front-left junction
+    -W + eps,-H,-D,  -W,-H,-D,   // bottom-back-left junction
+    -W + eps,-H, D,  -W,-H, D,   // bottom-front-left junction
+  ]);
+  faceLayerGroups.push({ fill: leftFill, stroke: leftStroke, localNormal: new THREE.Vector3(-1, 0, 0) });
+
+  // Front (+Z) and back (-Z) faces are intentionally left open (no fill) —
+  // the 3D depth and inner structure remain visible through those faces.
+
+  // Junction edge between top face (+Y, face 3) and stem (face 7): (-W,H,-D)→(-W,H,D).
+  // This is the suppressed crossbar — we want it visible from the UNDERSIDE (when
+  // left+stem is back-facing) but hidden in the normal view (when left+stem is front).
+  // Visibility is toggled per-frame in updateFaceLayerOrders().
+  const cbGeo = new LineSegmentsGeometry();
+  cbGeo.setPositions(new Float32Array([-W, H, -D,  -W, H, D]));
+  crossbarStroke = new LineSegments2(cbGeo, makeEdgeMaterial());
+  crossbarStroke.renderOrder = 2;
+  crossbarStroke.visible = false;
+  crossbarStroke.userData.isFaceLayerStroke = true;
+  crossbarStroke.userData.isCrossbarStroke  = true;
+  group.add(crossbarStroke);
 }
 
-// Builds a single fill plane that covers both the left (-X) box face and the stem,
-// so they read as one continuous surface instead of two separate fills.
-// In loadedObject-local space both sit on the x = -W plane:
-//   left face  y: -H → +H
-//   stem       y: +H → H + stemHeight
-// Combined: y from -H to H+stemHeight, z from -D to D.
-function buildCombinedStemFill(group) {
-  const W = PARAMS.shapeW, H = PARAMS.shapeH, D = PARAMS.shapeD, sH = PARAMS.stemHeight;
-  const totalH = 2 * H + sH;
-  // heightSegments: 2 puts a vertex row exactly at local y=0 → group y=H,
-  // so the triangle diagonal no longer crosses the junction and depth
-  // interpolation is exact there. Slightly higher polygonOffset than box faces
-  // (4/8) so it consistently wins the depth comparison at the shared edge.
-  const geo  = new THREE.PlaneGeometry(D * 2, totalH, 1, 2);
-  const posY = sH / 2; // center of combined range [-H, H+sH]
-
-  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    color: new THREE.Color(PARAMS.bgColor), side: THREE.DoubleSide,
-    polygonOffset: true, polygonOffsetFactor: 6, polygonOffsetUnits: 12,
-  }));
-  mesh.rotation.y = -Math.PI / 2;
-  mesh.position.set(-W, posY, 0);
-  mesh.renderOrder = -1;
-  mesh.visible = PARAMS.showFill;
-  mesh.userData.isCombinedFill = true;
-  mesh.userData.isFillColor    = true;
-  group.add(mesh);
+// Updates fill/stroke renderOrders each frame based on whether each face normal
+// points toward (+Z) or away from (-Z) the camera in world space.
+// front: fill=3, stroke=4 — back: fill=1, stroke=2.
+function updateFaceLayerOrders() {
+  if (!loadedObject || !PARAMS.showFill || faceLayerGroups.length === 0) return;
+  const worldQ = new THREE.Quaternion();
+  loadedObject.getWorldQuaternion(worldQ);
+  const tmp = new THREE.Vector3();
+  let leftStemFront = false;
+  faceLayerGroups.forEach(({ fill, stroke, localNormal }) => {
+    const front = tmp.copy(localNormal).applyQuaternion(worldQ).z > 0;
+    fill.renderOrder = front ? 3 : 1;
+    if (stroke) stroke.renderOrder = front ? 4 : 2;
+    // Track left+stem facing for crossbar visibility below
+    if (localNormal.x < 0 && localNormal.y === 0 && localNormal.z === 0) leftStemFront = front;
+  });
+  // Crossbar (stem-box junction): visible only from underside (left+stem back-facing)
+  if (crossbarStroke) {
+    crossbarStroke.visible = PARAMS.showArtwork && !leftStemFront;
+    crossbarStroke.renderOrder = 2;
+  }
 }
 
 function updateFill() {
@@ -653,14 +742,25 @@ function updateFill() {
     const mats = Array.isArray(child.material) ? child.material : [child.material];
     mats.forEach(m => { if (m?.color && m.visible !== false) m.color.setStyle(PARAMS.bgColor); });
   });
+  // Swap which stroke set is active: face-layer strokes when fill is ON,
+  // regular strokes (meshToLine) when fill is OFF.
+  updateArtwork();
 }
 
 function updateArtwork() {
+  const useLayers = PARAMS.showFill && faceLayerGroups.length > 0;
   loadedObject?.traverse((child) => {
-    if (child.isLineSegments2 && child.renderOrder === 0) {
+    if (!child.isLineSegments2) return;
+    if (child.userData.isFaceLayerStroke) {
+      // Face-layer strokes: active only when fill is ON
       child.material.color.setStyle(PARAMS.fillColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
-      child.visible = PARAMS.showArtwork;
+      child.visible = useLayers && PARAMS.showArtwork;
+    } else if (child.renderOrder === 0) {
+      // Regular artwork strokes: active only when fill is OFF
+      child.material.color.setStyle(PARAMS.fillColor);
+      child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
+      child.visible = !useLayers && PARAMS.showArtwork;
     }
   });
 }
@@ -693,7 +793,12 @@ function collectMaterials() {
       const mats = Array.isArray(child.material) ? child.material : [child.material];
       mats.forEach(m => { if (m?.color && m.visible !== false) fillMeshMaterials.push(m); });
     } else if (child.isLineSegments2) {
-      (child.renderOrder === 0 ? artworkMaterials : foundationMaterials).push(child.material);
+      // Face-layer strokes use dynamic renderOrders — identify by userData flag.
+      if (child.userData.isFaceLayerStroke || child.renderOrder === 0) {
+        artworkMaterials.push(child.material);
+      } else {
+        foundationMaterials.push(child.material);
+      }
     }
   });
 }
@@ -1026,9 +1131,33 @@ function resetView() {
 }
 
 function downloadScreenshot() {
+  const cw = canvasRef.value.clientWidth;
+  const ch = canvasRef.value.clientHeight;
+  const N = PREVIEW_SCHEMES.length;
+  const STRIP_H = PARAMS.showPreviews ? Math.round(Math.min(220, cw / N)) : 0;
+  const MAIN_H  = ch - STRIP_H;
+  const dpr     = window.devicePixelRatio;
+
+  // Render only the main viewport (same scissor rect as animate()).
+  renderer.setScissorTest(true);
+  renderer.setViewport(0, STRIP_H, cw, MAIN_H);
+  renderer.setScissor(0, STRIP_H, cw, MAIN_H);
+  setCameraAspect(cw / MAIN_H);
   renderer.render(scene, camera);
+  renderer.setScissorTest(false);
+
+  // The main viewport lives at the TOP of the WebGL canvas in 2D coords
+  // (GL y=STRIP_H from bottom → canvas y=0 from top because MAIN_H + STRIP_H = ch).
+  // Copy just that region to a temporary canvas, then export it.
+  const pw = Math.round(cw   * dpr);
+  const ph = Math.round(MAIN_H * dpr);
+  const tmp = document.createElement('canvas');
+  tmp.width  = pw;
+  tmp.height = ph;
+  tmp.getContext('2d').drawImage(renderer.domElement, 0, 0, pw, ph, 0, 0, pw, ph);
+
   const link = document.createElement('a');
-  link.href = renderer.domElement.toDataURL('image/png');
+  link.href = tmp.toDataURL('image/png');
   link.download = `sixth-street-${Date.now()}.png`;
   link.click();
   info.value = 'PNG saved';
@@ -1129,6 +1258,7 @@ function animate() {
   lastFrameTime = now;
 
   if (spring.active && animGroup) stepSpring(dt);
+  updateFaceLayerOrders();
 
   const cw = canvasRef.value.clientWidth;
   const ch = canvasRef.value.clientHeight;
@@ -1212,8 +1342,8 @@ function onWindowResize() {
   loadedObject?.traverse((child) => {
     if (!child.isLineSegments2) return;
     child.material.resolution?.set(w, mainH);
-    if (child.renderOrder === 0) child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
-    if (child.renderOrder === 1) child.material.linewidth = scaledLinewidth(PARAMS.foundationWeight);
+    if (child.userData.isFaceLayerStroke || child.renderOrder === 0) child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
+    else if (child.renderOrder === 1) child.material.linewidth = scaledLinewidth(PARAMS.foundationWeight);
   });
 }
 </script>
