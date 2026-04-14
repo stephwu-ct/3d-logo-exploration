@@ -732,12 +732,16 @@ function buildFaceLayers(group) {
   };
 
   const addStroke = (positions) => {
+    const arr = new Float32Array(positions);
     const geo = new LineSegmentsGeometry();
-    geo.setPositions(new Float32Array(positions));
+    geo.setPositions(arr);
     const l = new LineSegments2(geo, makeEdgeMaterial());
     l.renderOrder = 2;
     l.visible = PARAMS.showFill && PARAMS.showArtwork;
     l.userData.isFaceLayerStroke = true;
+    // Save the canonical segment data so drawIn can read it even if the
+    // geometry has been mutated to DEGENERATE by a previous animation run.
+    l.userData.originalPositions = arr;
     group.add(l);
     return l;
   };

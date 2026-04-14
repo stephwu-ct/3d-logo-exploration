@@ -23,8 +23,14 @@ export default {
       .filter(l => l.visible && !l.userData.isCrossbarStroke)
       .filter(l => l.geometry?.attributes?.instanceStart)
       .map(line => {
+        // Prefer originalPositions stored at build time — immune to any prior
+        // degenerate state left by a cancelled or interrupted animation run.
+        if (line.userData.originalPositions) {
+          const segs = line.userData.originalPositions;
+          return { line, segs, n: segs.length / 6 };
+        }
         const attr = line.geometry.attributes.instanceStart;
-        const segs = attr.data.array.slice(0, attr.count * 6); // copy
+        const segs = attr.data.array.slice(0, attr.count * 6);
         return { line, segs, n: attr.count };
       });
 
