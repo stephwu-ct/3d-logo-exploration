@@ -739,7 +739,7 @@ function buildFaceLayers(group) {
     const geo = new LineSegmentsGeometry();
     geo.setPositions(arr);
     const l = new LineSegments2(geo, makeEdgeMaterial());
-    l.renderOrder = 2;
+    l.renderOrder = 3;  // strokes always above fills (fills use 1/2, strokes use 3/4)
     l.visible = PARAMS.showFill && PARAMS.showArtwork;
     l.userData.isFaceLayerStroke = true;
     // Save the canonical segment data so drawIn can read it even if the
@@ -786,6 +786,9 @@ function buildFaceLayers(group) {
     -W,    H, D, W - r, H, D,  // front edge (right end trimmed)
     ...(r === 0 ? [W, H, D,  W, H,-D] : []),  // right edge — removed when rounded
   ]);
+  // Flag so updateArtwork() can hide this line in knockout+fill=OFF mode —
+  // the y=H horizontal creates an unwanted stem-body divide against the fills.
+  topStroke.userData.isTopFaceStroke = true;
   faceLayerGroups.push({ fill: topFill, stroke: topStroke, localNormal: new THREE.Vector3(0, 1, 0) });
 
   // Bottom face (-Y)
@@ -863,22 +866,26 @@ function buildFaceLayers(group) {
 // points toward (+Z) or away from (-Z) the camera in world space.
 // front: fill=3, stroke=4 — back: fill=1, stroke=2.
 function updateFaceLayerOrders() {
-  if (!loadedObject || !PARAMS.showFill || faceLayerGroups.length === 0) return;
+  // Run whenever fills are visually active: normal fill mode OR knockout mode.
+  // Without this, rotating in knockout+fill=OFF leaves fills at stale renderOrders.
+  if (!loadedObject || (!PARAMS.showFill && !PARAMS.knockout) || faceLayerGroups.length === 0) return;
   const worldQ = new THREE.Quaternion();
   loadedObject.getWorldQuaternion(worldQ);
   const tmp = new THREE.Vector3();
   let leftStemFront = false;
   faceLayerGroups.forEach(({ fill, stroke, localNormal }) => {
     const front = tmp.copy(localNormal).applyQuaternion(worldQ).z > 0;
-    if (fill) fill.renderOrder = front ? 3 : 1;
-    if (stroke) stroke.renderOrder = front ? 4 : 2;
+    // Fills: 1 (back) / 2 (front). Strokes: 3 (back) / 4 (front).
+    // Strokes always win over fills regardless of face direction — fixes the
+    // blob artifact where front fill (3) was painting over back strokes (2).
+    if (fill) fill.renderOrder = front ? 2 : 1;
+    if (stroke) stroke.renderOrder = front ? 4 : 3;
     // Track left+stem facing for crossbar visibility below
     if (localNormal.x < 0 && localNormal.y === 0 && localNormal.z === 0) leftStemFront = front;
   });
   // Crossbar (stem-box junction): visible only from underside (left+stem back-facing).
-  // renderOrder 4.5 — above ALL face-layer fills (1/3) and strokes (2/4) — because
-  // the crossbar runs exactly along the top face's left edge. topFill (order 3) would
-  // cover it at any lower value. We want it on top of everything when visible.
+  // renderOrder 4.5 — above all face-layer fills (max 2) and strokes (max 4).
+  // We want it on top of everything when visible.
   if (crossbarStroke) {
     crossbarStroke.visible = PARAMS.showArtwork && !leftStemFront;
     crossbarStroke.renderOrder = 4.5;
@@ -909,10 +916,13 @@ function updateArtwork() {
   loadedObject?.traverse((child) => {
     if (!child.isLineSegments2) return;
     if (child.userData.isFaceLayerStroke) {
-      // Face-layer strokes: visible whenever fills are active
+      // In knockout+fill=OFF: hide the top-face separator (y=H line between face 2
+      // and face 7). The right/bottom/left face strokes still show depth diagonals
+      // (the "1 and 3 strokes") through the orange fills. All other modes: show as normal.
+      const hideJunction = PARAMS.knockout && !PARAMS.showFill && child.userData.isTopFaceStroke;
       child.material.color.setStyle(faceLayerColor);
       child.material.linewidth = scaledLinewidth(PARAMS.edgeWeight);
-      child.visible = fillsActive && PARAMS.showArtwork;
+      child.visible = !hideJunction && fillsActive && PARAMS.showArtwork;
     } else if (child.renderOrder === 0) {
       // Regular strokes (all edges incl. crossbars): visible when fill is OFF.
       // Overlays the knockout view when knockout=ON + showFill=OFF, letting
